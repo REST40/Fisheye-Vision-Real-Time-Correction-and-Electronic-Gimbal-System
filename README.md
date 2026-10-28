@@ -59,10 +59,3 @@ python3 HOST/tools/quality/verify_reference.py
 UDP 5500 为控制与遥测，5501 为双 JPEG 输入，5502 为全景 JPEG 回传。
 通信采用项目自定义 FPTZ v3 协议，完整全景模式为 2656×1328。
 详见 [系统结构与数据流](docs/architecture.md)。
-
-## 来源与验证范围
-
-编解码器的开源来源、固定版本和项目适配范围见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
-整理过程保持 PL/PS/HOST 业务源码内容不变，仅整理入口、依赖和辅助路径。
-本仓库整理验证不代表重新完成硬件综合、时序收敛或上板性能验收。
-文件校验、已执行检查和外部依赖见 [提交说明](docs/submission.md)。
