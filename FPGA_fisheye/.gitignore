@@ -1,0 +1,41 @@
+# Generated hardware/software workspaces
+**/build/
+**/build-*/
+**/Debug/
+**/Release/
+**/.Xil/
+**/.metadata/
+**/*.runs/
+**/*.cache/
+**/*.gen/
+**/*.ip_user_files/
+**/output/
+**/.runtime/
+**/__pycache__/
+*.pyc
+*.o
+*.d
+*.a
+*.so
+*.so.*
+*.elf
+*.bit
+*.bin
+*.dcp
+*.log
+*.jou
+*.wdb
+*.vcd
+*.zip
+*.rar
+# Only the explicitly delivered PL XSA is versioned
+*.xsa
+!PL/hardware_export/pl_project_snapshot.xsa
+# SDKs and camera recordings stay local
+HOST/dependencies/*
+!HOST/dependencies/README.md
+HOST/data/demo/*
+!HOST/data/demo/README.md
+HOST/data/captures/
+HOST/config/capture_settings.json
+.DS_Store

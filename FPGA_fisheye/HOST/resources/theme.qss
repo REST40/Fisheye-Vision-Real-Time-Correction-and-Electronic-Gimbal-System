@@ -1,0 +1,28 @@
+QWidget {background:#101113;color:#f4f5f6;font-family:"Noto Sans CJK SC";font-size:13px;}
+QLabel {background:transparent;}
+QFrame#header {background:#151619;border-bottom:1px solid #292b2f;}
+QFrame#viewPanel,QFrame#metrics {background:#1a1c1f;border:1px solid #2c2e32;border-radius:14px;}
+QLabel#brand {font-size:28px;font-weight:900;font-style:italic;color:#ffe400;}
+QLabel#title {font-size:24px;font-weight:700;}
+QLabel#section {font-size:15px;font-weight:700;}
+QLabel#muted {color:#969ba3;font-size:12px;}
+QLabel#metric {font-size:25px;font-weight:700;}
+QLabel#pill {background:#282b2f;color:#ccd0d6;border-radius:10px;padding:5px 11px;font-size:11px;}
+QPushButton {background:#292c31;border:1px solid #393d43;border-radius:8px;padding:9px 14px;font-weight:600;}
+QPushButton:hover {background:#353a42;border-color:#535a65;}
+QPushButton:disabled {color:#646a73;background:#202227;border-color:#2c2f34;}
+QPushButton#yellow {background:#ffe400;color:#141414;border:none;}
+QPushButton#yellow:disabled {background:#524d22;color:#777244;}
+QComboBox,QSpinBox,QDoubleSpinBox,QLineEdit {background:#111315;color:#e4e6e9;border:1px solid #353941;border-radius:7px;min-height:23px;padding:7px 10px;}
+QComboBox:disabled,QSpinBox:disabled,QDoubleSpinBox:disabled {color:#797f88;}
+QComboBox QAbstractItemView {background:#22252b;color:#eee;selection-background-color:#565124;}
+QTabWidget::pane {border:1px solid #353941;border-radius:8px;}
+QTabBar::tab {background:#202328;color:#b6bdc7;padding:12px 18px;}
+QTabBar::tab:selected {background:#343222;color:#ffe400;}
+QScrollArea {border:0;background:transparent;}
+QScrollBar:vertical {background:#17191c;width:8px;}
+QScrollBar::handle:vertical {background:#41464f;border-radius:4px;min-height:32px;}
+QSlider::groove:horizontal {height:4px;background:#393e47;border-radius:2px;}
+QSlider::handle:horizontal {width:12px;margin:-4px 0;background:#ffe400;border-radius:6px;}
+QSlider::handle:horizontal:disabled {background:#626873;}
+QListWidget,QPlainTextEdit {background:#17191c;border:1px solid #353941;border-radius:8px;}

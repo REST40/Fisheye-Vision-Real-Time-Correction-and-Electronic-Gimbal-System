@@ -1,0 +1,6 @@
+# Preserve the delivered source bytes and SHA-256 across Git checkouts.
+* -text
+*.xsa binary
+*.png binary
+*.jpg binary
+*.pdf binary

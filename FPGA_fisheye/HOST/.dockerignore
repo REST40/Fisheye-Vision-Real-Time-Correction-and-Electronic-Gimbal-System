@@ -1,0 +1,7 @@
+build
+output
+.runtime
+.git
+**/__pycache__
+data
+dependencies

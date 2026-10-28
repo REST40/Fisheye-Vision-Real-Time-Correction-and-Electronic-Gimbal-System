@@ -1,0 +1,44 @@
+{
+  "python_syntax": "passed",
+  "host_build_and_tests": {
+    "build": "passed",
+    "configuration": "Release; BUILD_X5_CAPTURE=OFF",
+    "compiler": "GCC 13.3.0",
+    "qt": "6.4.2",
+    "container_image": "double-fisheye-qt",
+    "container_image_id": "sha256:9d48c5272c6cdb35f7e94fb18726d6c2786b8ed60a9abe217afd35e7a5fe3e03",
+    "network": "disabled",
+    "tests": {
+      "quality_tests": "passed",
+      "latency_tests": "passed",
+      "board_pair_tests": "passed",
+      "host_tests": "passed"
+    },
+    "ctest_seconds": 10.55,
+    "fixtures": "Generated synthetic 1328x1328 MJPEG, 30 fps, 300 frames per lens"
+  },
+  "vivado_build": "not_run",
+  "vitis_build": "not_run",
+  "hardware_test": "not_run",
+  "checked_date": "2026-10-27",
+  "ps_host_reference": {
+    "result": "passed",
+    "pixels": 3527168,
+    "lut_bytes": 63489024,
+    "lut_sha256": "e04668f526c9ad90775ee9729bda042bce5e4dcec811c47fd4d24c4589b084a7",
+    "reference_sha256": "dcc2863e946a7b946810f46185151afb5096deb49df6dd262e204ee81d7d3d84"
+  },
+  "pl_static": {
+    "project_sources_resolved": 44,
+    "ip_file_references_resolved": 11,
+    "dual_decoder_bd": true,
+    "encoder_size": [
+      2656,
+      1328
+    ],
+    "tcl_syntax_complete": true
+  },
+  "ps_tcl_syntax_complete": true,
+  "x5_sdk_build": "not_run; proprietary SDK excluded",
+  "xsa_count": 1
+}

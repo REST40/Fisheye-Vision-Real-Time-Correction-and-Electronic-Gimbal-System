@@ -1,0 +1,147 @@
+{
+  "schema_version": 1,
+  "input_size": [
+    1328,
+    1328
+  ],
+  "model": "Mei_unified_omnidirectional_with_5_Brown_Conrady_coefficients",
+  "D_order": [
+    "k1",
+    "k2",
+    "p1",
+    "p2",
+    "k3"
+  ],
+  "cv2_fisheye_directly_compatible": false,
+  "cv2_omnidir_directly_preserves_all_coefficients": false,
+  "implementation": "Mei projection including k3, then cv2.remap",
+  "crop_policy": "assumed_center_crop_then_resize",
+  "crop_formula_vendor_documented": false,
+  "factory_conversion_certified": false,
+  "measured_geometric_accuracy_certified": false,
+  "lens_mapping": {
+    "front": "left",
+    "rear": "right",
+    "verification": "用户遮挡屏幕侧镜头，双鱼眼左半变黑；用户确认已移开手后采集"
+  },
+  "output": {
+    "size": [
+      1328,
+      1328
+    ],
+    "projection": "perspective",
+    "hfov_degrees": 90,
+    "vfov_degrees": 90,
+    "yaw_degrees": 0,
+    "pitch_degrees": 0,
+    "roll_degrees": 0
+  },
+  "lenses": {
+    "front": {
+      "raw_half_index": 0,
+      "K": [
+        [
+          1071.0475,
+          0.0,
+          666.0725
+        ],
+        [
+          0.0,
+          1071.065,
+          663.2675
+        ],
+        [
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "D": [
+        0.17765993,
+        2.12803125,
+        -0.00254626,
+        -0.00340629,
+        -3.36999106
+      ],
+      "xi": 2.0,
+      "K_output": [
+        [
+          664.0000000000001,
+          0.0,
+          663.5
+        ],
+        [
+          0.0,
+          664.0000000000001,
+          663.5
+        ],
+        [
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "crop": {
+        "src_width": 5376,
+        "src_height": 5376,
+        "dst_width": 5312,
+        "dst_height": 5312,
+        "crop_offset_x": 0,
+        "crop_offset_y": 0
+      }
+    },
+    "rear": {
+      "raw_half_index": 1,
+      "K": [
+        [
+          1069.995,
+          0.0,
+          666.1075000000001
+        ],
+        [
+          0.0,
+          1070.56,
+          666.3725
+        ],
+        [
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "D": [
+        0.17892803,
+        2.11621904,
+        -0.00231063,
+        -0.00110232,
+        -3.3377471
+      ],
+      "xi": 2.0,
+      "K_output": [
+        [
+          664.0000000000001,
+          0.0,
+          663.5
+        ],
+        [
+          0.0,
+          664.0000000000001,
+          663.5
+        ],
+        [
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "crop": {
+        "src_width": 5376,
+        "src_height": 5376,
+        "dst_width": 5312,
+        "dst_height": 5312,
+        "crop_offset_x": 0,
+        "crop_offset_y": 0
+      }
+    }
+  }
+}

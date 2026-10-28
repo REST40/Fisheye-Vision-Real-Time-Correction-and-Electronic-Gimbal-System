@@ -1,0 +1,13 @@
+{
+  "source": "7ev_fish_app/src",
+  "sha256": "dcc2863e946a7b946810f46185151afb5096deb49df6dd262e204ee81d7d3d84",
+  "files": {
+    "fptz_lut_generate.c": "fb8636bb490217c5ee6755997d50b78460f585bb217a7d69c3dd086e1bef77f6",
+    "fptz_lut_generate.h": "91582a25eead5c5fa7c8d6467f8bb08beb2272bd3739f02ee86c6ba6e0222a10",
+    "fptz_camera.h": "88a08438d93da502ce267579115a6baadf41b6faa6f58221c65ea454a6670134",
+    "fptz_geometry.h": "91e1cb776c4bf7a16759eff7e28ed86fcc89173cc600bd82bbde6d3e2f1e2db4",
+    "fptz_scene_mask.h": "70a86326d6e0b880cfc9b634b872dcc344c8337bbb177093c78f0145aafefbcd",
+    "fptz_scene_mask.c": "a80cc5b8efcabeb70028e4950534dd0db939d10bd1e6dce2ac50f7ced7edb08c",
+    "fptz_scene_mask_data.c": "1dd825894ae342005c7f46565257092b8d81f536452b9e9d98392da1c7b0c8d7"
+  }
+}
