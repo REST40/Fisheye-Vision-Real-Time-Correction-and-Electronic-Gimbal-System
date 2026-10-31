@@ -33,7 +33,7 @@ set source_paths {
     {mjpeg/third_party/core_jpeg/src_v/jpeg_idct_transpose_ram.v}
     {mjpeg/third_party/core_jpeg/src_v/jpeg_idct_x.v}
     {mjpeg/third_party/core_jpeg/src_v/jpeg_idct_y.v}
-    {mjpeg/third_party/core_jpeg/src_v/jpeg_input.v}
+    {mjpeg/adapted/jpeg_input.v}
     {mjpeg/adapted/jpeg_mcu_id.v}
     {mjpeg/third_party/core_jpeg/src_v/jpeg_mcu_proc.v}
     {mjpeg/third_party/core_jpeg/src_v/jpeg_output.v}

@@ -11,7 +11,7 @@ class SimulationService : public QThread {
   public:
     explicit SimulationService(QString parameters, QObject *parent = nullptr);
     ~SimulationService() override;
-    quint64 load(const QString &directory, bool video);
+    quint64 load(const QString &directory, bool video, bool boardInput = false);
     void unload();
     void setView(View value);
     void setAlignment(Alignment value);
@@ -32,6 +32,7 @@ class SimulationService : public QThread {
     struct State {
         QString directory;
         bool video = true, playing = true;
+        bool boardInput = false;
         View view;
         Alignment alignment;
         double seek = 0;

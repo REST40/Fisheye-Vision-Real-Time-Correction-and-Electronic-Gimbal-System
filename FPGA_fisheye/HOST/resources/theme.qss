@@ -10,6 +10,7 @@ QLabel#metric {font-size:25px;font-weight:700;}
 QLabel#pill {background:#282b2f;color:#ccd0d6;border-radius:10px;padding:5px 11px;font-size:11px;}
 QPushButton {background:#292c31;border:1px solid #393d43;border-radius:8px;padding:9px 14px;font-weight:600;}
 QPushButton:hover {background:#353a42;border-color:#535a65;}
+QPushButton#presentationButton:checked,QPushButton#presentationAuto:checked {background:#ffe400;color:#141414;border-color:#ffe400;}
 QPushButton:disabled {color:#646a73;background:#202227;border-color:#2c2f34;}
 QPushButton#yellow {background:#ffe400;color:#141414;border:none;}
 QPushButton#yellow:disabled {background:#524d22;color:#777244;}

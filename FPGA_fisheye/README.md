@@ -1,81 +1,80 @@
-# 基于 FPGA 的双鱼眼全景图像处理系统
+# FPGA 双鱼眼全景图像处理系统
 
-本项目为 FPGA 创新设计竞赛作品，基于 Zynq UltraScale+ 平台实现双鱼眼图像的畸变校正、全景拼接融合及交互显示。
+基于 Zynq UltraScale+ 的双鱼眼图像处理系统，包含 FPGA 逻辑、ARM 板端程序和 Linux Qt 上位机。系统对同一帧的前后鱼眼图像进行几何校正、双线性插值和重叠区域融合，输出全景图像，并提供球面浏览与电子云台交互。
 
-系统接收 Insta360 X5 的 2656×1328 双鱼眼图像，将同一帧拆分为前后两幅 1328×1328 图像并编码为 JPEG，经网络发送至板端。PL 完成双路 JPEG 解码、校正插值、重叠区域加权融合及全景 JPEG 编码；PS 负责映射表生成、硬件调度和网络收发；Qt 上位机负责采集、全景球面展示、虚拟云台浏览与测试分析。
+输入为两幅 1328×1328 鱼眼图像，完整全景输出为 2656×1328。相机通过 USB 接入上位机，上位机与 FPGA 板卡通过以太网通信。
 
-**关键词：鱼眼畸变校正 · 全景拼接融合 · FPGA 并行流水处理**
+## 功能
 
-## 主要功能
+- **几何校正**：根据 Mei 全向相机模型和 Brown 畸变参数生成反向映射表，使用 Q6 定点坐标定位源像素。
+- **插值与融合**：FPGA 对四邻点进行双线性插值，在前后镜头重叠区域使用 Q8 互补权重融合。
+- **硬件图像链路**：双路 JPEG 解码、源行缓存、校正融合、全景 JPEG 编码与 DMA 写回。
+- **板端调度**：映射表生成、UDP 分片重组、帧槽管理、处理调度和遥测。
+- **交互显示**：全景预览、球面视图、电子云台方向和视场角调节。
+- **分析与测试**：输入及回图帧率、分阶段延迟、同帧 PSNR / SSIM 质量分析。
 
-- 基于标定模型的双鱼眼映射与双线性插值。
-- 前后镜头重叠区域平滑加权融合，输出 2656×1328 的完整全景。
-- 双路并行插值、分 bank 片上缓存与多级流水处理。
-- 双路 JPEG 输入、全景 JPEG 输出及网络传输。
-- 全景球面显示、虚拟云台方向与视场交互。
-- 帧率统计、分阶段延迟分析及同帧 PSNR / SSIM 图像质量评估。
-
-## 系统数据流
-
-1. HOST 采集并拆分同帧双鱼眼图像，上传双路 JPEG。
-2. PS 完成分片重组、CRC 校验与帧槽调度。
-3. PL 双路解码器写回源图像，并提供已提交行进度。
-4. 校正融合模块读取映射坐标、融合权重和源像素，生成全景像素流。
-5. JPEG 编码器压缩全景，AXI DMA 将码流写回 DDR，PS 回传结果。
-6. HOST 解码回图，生成球面与透视视角显示，并统计测试指标。
-
-## 项目结构
+## 数据流程
 
 ```text
-PL/
-  design/mjpeg_system.bd             系统 Block Design
-  mjpeg/rtl/                         AXI 接口与编解码辅助电路
-  mjpeg/adapted/                     项目适配后的编解码模块
-  mjpeg/third_party/                 第三方源码与许可证
-  fisheye_ip/ip_repo/                鱼眼校正融合 IP
-  scripts/create_project.tcl         Vivado 工程创建脚本
-  hardware_export/                   PL 硬件平台文件
-PS/
-  7ev_fish_app/src/                  板端应用源码
-  config/                           BSP 与应用构建配置
-  scripts/create_platform.tcl        Vitis 平台创建脚本
-HOST/
-  src/                              Qt 上位机源码
-  tests/                            软件测试
-  config/                           标定与 SDK 配置
-  dependencies/README.md             外部 SDK 安装说明
-  tools/                            构建、测试与演示数据工具
-tools/verify_repository.py           项目文件完整性检查
+双鱼眼相机 / 离线录像
+         │
+         ▼
+Linux Qt 上位机：同帧拆分、双路 JPEG 上传
+         │ UDP
+         ▼
+PS：协议与帧槽调度、映射表生成
+         │ DDR / AXI
+         ▼
+PL：双路解码 → 四点插值与融合 → 全景编码 → DMA
+         │ PS / UDP 回传
+         ▼
+Qt 上位机：全景显示、球面与电子云台投影
 ```
+
+观看方向和视场角在上位机本地调整；全景模式下无需随视角变化重建板端映射表。
+
+## 目录
+
+| 目录 | 内容 |
+|---|---|
+| [PL](PL/README.md) | RTL、Block Design、自定义校正 IP 和 Vivado 工程脚本 |
+| [PS](PS/README.md) | Cortex-A53 standalone 应用、BSP 配置和 Vitis 平台脚本 |
+| [HOST](HOST/README.md) | Qt 上位机、软件参考实现、采集适配器和测试 |
+| [tools/verify_repository.py](tools/verify_repository.py) | 源文件与工程引用检查 |
+| [tools/environment](tools/environment/README.md) | FFmpeg 及部分多媒体运行库的 DEB 安装材料 |
+
+仓库包含源码、工程配置、界面资源、测试、文档和环境安装材料。相机 SDK、录像、构建目录、日志、位流及 XSA 等生成文件不随源码分发。
 
 ## 开发环境
 
-| 部分 | 环境 | 使用说明 |
-|---|---|---|
-| PL | Vivado 2022.2；XCZU7EV-FFVC1156-2-I | [PL/README.md](PL/README.md) |
-| PS | Vitis / XSCT 2022.2；Cortex-A53 64-bit standalone；lwIP | [PS/README.md](PS/README.md) |
-| HOST | Linux；C++17；CMake；Qt 6.4+；OpenCV；FFmpeg | [HOST/README.md](HOST/README.md) |
+| 部分 | 环境 |
+|---|---|
+| PL | Vivado 2022.2；器件 `xczu7ev-ffvc1156-2-i` |
+| PS | Vitis / XSCT 2022.2；Cortex-A53 64-bit standalone；lwIP |
+| HOST | Linux；C++17；CMake 3.20+；Qt 6.4+；OpenCV；FFmpeg |
 
-PL 硬件平台文件为 `PL/hardware_export/pl_project_snapshot.xsa`。PS 平台根据该文件生成。更新硬件设计后，应重新导出 XSA 并同步更新 PS 平台。
+## 快速开始
 
-## 检查与测试
-
-在仓库根目录执行：
+以下命令均从仓库根目录执行。只体验界面和软件参考时，可先构建不依赖相机 SDK 的上位机：
 
 ```bash
-python3 tools/verify_repository.py
-python3 HOST/tools/quality/verify_reference.py
+cmake -S HOST -B HOST/build -DCMAKE_BUILD_TYPE=Release -DBUILD_X5_CAPTURE=OFF
+cmake --build HOST/build --parallel 4
+python3 HOST/tools/generate_demo.py
+./HOST/build/double_fisheye_host
 ```
 
-- 第一项核对文件 SHA-256、硬件平台文件、IP 源文件引用及系统连接参数。
-- 第二项需要 GCC，用于比较 HOST 软件参考与 PS 映射表生成结果。
-- 上位机自动化测试覆盖协议、双路帧配对、延迟统计和图像质量等功能，操作方法见 [HOST/README.md](HOST/README.md)。
-- 同帧图像质量分析比较软件参考全景与板端 JPEG 回图，采用 PSNR / SSIM 指标；结果包含图像处理与编解码影响。
-- 软件测试环境与结果记录见 [verification.json](verification.json)。硬件测试记录包括构建配置、输入数据、帧率和分阶段耗时等指标。
+首次生成的演示输入是合成测试图像。可在界面的“参数设置 → 软件仿真”中加载软件参考模式；板卡链路的实际回图需要连接并运行 PS/PL。
 
-## 系统连接
+构建完整系统的顺序：
 
-默认上位机地址为 `192.168.10.100`，板端地址为 `192.168.10.10`。
+1. 按 [PL 构建说明](PL/README.md) 创建 Vivado 工程、生成位流并导出 XSA。
+2. 按 [PS 构建说明](PS/README.md) 创建 Vitis 平台和板端应用。
+3. 按 [HOST 使用说明](HOST/README.md) 配置网卡、输入来源与相机 SDK。
+
+## 网络连接
+
+默认电脑地址为 `192.168.10.100`，板端地址为 `192.168.10.10`，两端有线网卡应处于同一子网。
 
 | UDP 端口 | 用途 |
 |---|---|
@@ -83,8 +82,20 @@ python3 HOST/tools/quality/verify_reference.py
 | 5501 | 同帧双路 JPEG 输入 |
 | 5502 | 全景 JPEG 回传 |
 
-通信采用 FPTZ v3 协议，完整全景模式输出尺寸为 2656×1328。观看方向由上位机本地渲染调整。
+链路使用 FPTZ v3 协议。修改网络参数时，应同步检查 HOST 配置入口与 PS 源码中的对应设置。
 
-## 第三方组件
+## 检查与测试
 
-编解码器来源、固定版本、许可证及项目适配说明见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。相机 SDK 获取与安装方法见 [HOST/dependencies/README.md](HOST/dependencies/README.md)。
+```bash
+python3 tools/verify_repository.py
+python3 HOST/tools/quality/verify_reference.py
+QT_QPA_PLATFORM=offscreen ctest --test-dir HOST/build --output-on-failure
+```
+
+第一项只使用 Python 标准库，检查工程引用、IP 文件和关键配置；第二项需要 GCC，对比 HOST 软件参考与 PS 生成的完整映射表。Qt 测试需先完成上位机构建并生成演示输入。
+
+软件测试覆盖协议、双路帧配对、投影、延迟统计和图像质量计算。PSNR / SSIM 使用同帧软件参考全景与板端 JPEG 回图对照，包含图像处理和编解码影响；实际帧率与延迟取决于输入内容、构建配置及运行环境。
+
+## 第三方组件与许可
+
+第三方源码版本、许可证和项目适配范围见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。相机 SDK 的获取和安装见 [HOST/dependencies/README.md](HOST/dependencies/README.md)。自有代码尚未指定统一开源许可证。

@@ -12,8 +12,11 @@
 #define FPTZ_INPUT_BITMAP_BYTES 8192u
 #define FPTZ_OUTPUT_BITMAP_BYTES 4096u
 /* Bounded egress: yield to RX and hardware pumps between small batches. */
-#define FPTZ_VIDEO_TX_BURST 6u
-#define FPTZ_VIDEO_TX_GAP_US 1000u
+#define FPTZ_VIDEO_TX_BURST 16u
+#define FPTZ_VIDEO_TX_GAP_US 250u
+#define FPTZ_VIDEO_TX_BUDGET_US 250u
+#define FPTZ_VIDEO_TX_RETRY_US 100000u
+#define FPTZ_SEND_AGAIN (-2)
 #define FPTZ_FLOW_BYTES 280u
 #define FPTZ_LATENCY_BYTES 160u
 #define FPTZ_CORRECTOR_CLOCK_HZ 166664993u /* platform XSA corrector/aclk */
@@ -68,6 +71,7 @@ typedef struct FptzFrameSlot {
     uint8_t tx_credit_taken;
     uint8_t rx_ack_counter;
     uint64_t last_tx_us;
+    uint64_t tx_retry_started_us;
     uint64_t first_rx_us;
     /* Board-local monotonic timestamps; never subtract Host capture_ts_ms. */
     uint64_t input_ready_us, admitted_us, output_ready_us, first_tx_us;
@@ -114,6 +118,7 @@ typedef struct {
 } FptzPipelineStats;
 
 typedef struct {
+    /* send: nonnegative accepted; FPTZ_SEND_AGAIN defers; other negatives fail. */
     int (*send)(void *ctx, uint16_t local_port, uint16_t remote_port,
                 const uint8_t *packet, uint16_t length);
     /* start_frame: 0 admitted, positive defer, negative hardware/argument fault. */
@@ -225,6 +230,7 @@ typedef struct {
     uint64_t return_started_us;
     uint16_t return_tx_count;
     uint16_t return_tx_next;
+    uint64_t return_retry_started_us;
     uint8_t return_active;
     FptzFrameSlot *capacity_sample;
     uint32_t capacity_test_id;

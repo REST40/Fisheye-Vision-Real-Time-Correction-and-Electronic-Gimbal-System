@@ -1,4 +1,4 @@
-# Generated hardware/software workspaces
+# Build directories and tool workspaces
 **/build/
 **/build-*/
 **/Debug/
@@ -9,10 +9,17 @@
 **/*.cache/
 **/*.gen/
 **/*.ip_user_files/
-**/output/
 **/.runtime/
+**/output/
 **/__pycache__/
-*.pyc
+**/.pytest_cache/
+**/CMakeFiles/
+CMakeCache.txt
+compile_commands.json
+
+# Generated hardware, software, logs, and traces
+PL/hardware_export/
+*.py[cod]
 *.o
 *.d
 *.a
@@ -21,21 +28,35 @@
 *.elf
 *.bit
 *.bin
+*.xsa
 *.dcp
 *.log
 *.jou
 *.wdb
 *.vcd
+*.rpt
+*.deb
 *.zip
 *.rar
-# Only the explicitly delivered PL XSA is versioned
-*.xsa
-!PL/hardware_export/pl_project_snapshot.xsa
-# SDKs and camera recordings stay local
+
+# Bundled environment installers
+!tools/environment/deb/*.deb
+
+# External SDKs and local data
 HOST/dependencies/*
 !HOST/dependencies/README.md
+HOST/data/*
+!HOST/data/demo/
 HOST/data/demo/*
 !HOST/data/demo/README.md
-HOST/data/captures/
 HOST/config/capture_settings.json
+
+# Local editor and assistant state
+.agents/
+.aws/
+.codex/
+.idea/
+.vscode/
 .DS_Store
+Thumbs.db
+*.swp

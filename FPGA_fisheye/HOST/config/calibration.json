@@ -22,7 +22,7 @@
   "lens_mapping": {
     "front": "left",
     "rear": "right",
-    "verification": "用户遮挡屏幕侧镜头，双鱼眼左半变黑；用户确认已移开手后采集"
+    "verification": "前镜头对应输入图像左半，后镜头对应右半。"
   },
   "output": {
     "size": [

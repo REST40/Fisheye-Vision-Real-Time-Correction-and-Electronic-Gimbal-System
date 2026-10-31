@@ -25,6 +25,8 @@ class BoardVideoService final : public QThread {
     bool qualityCanCapture() const;
     BoardEndpoints qualityEndpoints() const;
     void submit(const QImage &fullFrame, qint64 cameraTimestampMs = 0);
+    void setInputJpegQuality(int quality, bool smooth = false);
+    void setDisplaySizes(int sphereDiameter, int perspectiveWidth);
     void submitJpeg(const QByteArray &jpeg, qint64 capturedMs);
     void startHostPsRateTest();
     void stopHostPsRateTest();
@@ -42,6 +44,7 @@ class BoardVideoService final : public QThread {
     };
     Display takeDisplay();
     QImage takeSphere();
+    QImage takePanorama();
     LatencyTracker &latencyTracker() {
         return m_latency;
     }
@@ -130,8 +133,11 @@ class BoardVideoService final : public QThread {
     qint64 m_poseDue = 0, m_capture = 0, m_encodedCapture = 0;
     quint32 m_epoch = 0;
     quint32 m_cameraTimestamp = 0, m_encodedCameraTimestamp = 0;
-    QImage m_raw, m_sphere;
+    QImage m_raw, m_sphere, m_panorama;
+    int m_inputJpegQuality = 85;
+    bool m_smoothInput = false;
     bool m_viewDirty = false;
+    QSize m_sphereSize{720, 720}, m_perspectiveSize{1280, 720};
     QByteArray m_encoded;
     struct Output {
         QByteArray jpeg;

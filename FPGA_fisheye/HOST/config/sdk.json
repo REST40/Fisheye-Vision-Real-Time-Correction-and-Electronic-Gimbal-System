@@ -5,7 +5,6 @@
   "codec": "h264",
   "timestamp_hz": 1000,
   "verified_sdk_headers": true,
-  "note": "X5 firmware v1.13.21, Camera 2.1.1 + Media 3.1.1: live H264 dual fisheye 2656x1328; common millisecond timestamps; RGBA stitch output validated at 1920x960 and 2656x1328. Native Wayland Qt GUI, NVENC dual recording (120s + repeated clips), libx264 fallback, paired PNG and MP4 PTS/archive checks passed. FlowState enabled; startup warmup and stop boundaries reported. Host libcuda retained.",
   "exposure_function_mode": 7,
   "exposure_validation": {
     "camera": "Insta360 X5",
@@ -43,7 +42,6 @@
       4
     ],
     "ev_step": 0.5,
-    "evidence": "evidence/exposure_probe_20261008_193305/verification.json",
     "per_frame_iso_available": false
   },
   "video_delay_ms": -1,

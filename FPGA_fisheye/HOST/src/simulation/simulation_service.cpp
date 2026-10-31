@@ -18,10 +18,11 @@ SimulationService::~SimulationService() {
     stop();
     wait();
 }
-quint64 SimulationService::load(const QString &directory, bool video) {
+quint64 SimulationService::load(const QString &directory, bool video, bool boardInput) {
     QMutexLocker lock(&mutex);
     state.directory = directory;
     state.video = video;
+    state.boardInput = boardInput;
     state.playing = video;
     state.seek = 0;
     latest.reset();
@@ -114,10 +115,10 @@ void SimulationService::run() {
         }
         try {
             if (applied != gen) {
-                if (!geometry)
+                if (!current.boardInput && !geometry)
                     geometry = std::make_unique<Projection>(parameters);
                 source = std::make_unique<PairedSource>(current.directory, current.video,
-                                                        geometry->inputSize);
+                                                        current.boardInput ? cv::Size(1328, 1328) : geometry->inputSize);
                 applied = gen;
                 lastFrame = fullFrame = -1;
                 frozen = 0;
@@ -148,8 +149,10 @@ void SimulationService::run() {
             }
             double started = now();
             const auto &frames = source->read(index);
-            geometry->setAlignment(current.alignment);
-            geometry->setView(current.view);
+            if (!current.boardInput) {
+                geometry->setAlignment(current.alignment);
+                geometry->setView(current.view);
+            }
             if (index != lastFrame) {
                 cv::Mat a, b, combined;
                 cv::resize(frames[0], a, {480, 480}, 0, 0, cv::INTER_LINEAR);
@@ -157,18 +160,20 @@ void SimulationService::run() {
                 cv::hconcat(a, b, combined);
                 raw = toImage(combined);
             }
-            if (index != fullFrame || !(current.alignment == fullAlignment)) {
+            if (!current.boardInput && (index != fullFrame || !(current.alignment == fullAlignment))) {
                 panorama = toImage(geometry->panoramaMap.render(frames[0], frames[1]));
                 fullFrame = index;
                 fullAlignment = current.alignment;
             }
             cv::Mat sphere;
-            cv::cvtColor(geometry->sphereMap.render(frames[0], frames[1]), sphere,
-                         cv::COLOR_BGR2BGRA);
-            std::vector<cv::Mat> channels;
-            cv::split(sphere, channels);
-            channels[3] = geometry->sphereDomain;
-            cv::merge(channels, sphere);
+            if (!current.boardInput) {
+                cv::cvtColor(geometry->sphereMap.render(frames[0], frames[1]), sphere,
+                             cv::COLOR_BGR2BGRA);
+                std::vector<cv::Mat> channels;
+                cv::split(sphere, channels);
+                channels[3] = geometry->sphereDomain;
+                cv::merge(channels, sphere);
+            }
             FramePacket packet;
             packet.generation = gen;
             packet.frame = index;
@@ -181,11 +186,17 @@ void SimulationService::run() {
             packet.view = current.view;
             packet.alignment = current.alignment;
             packet.raw = raw;
-            packet.panorama = panorama;
-            packet.sphere = toImage(sphere);
-            packet.gimbal = toImage(geometry->gimbalMap.render(frames[0], frames[1]));
-            packet.coverage = double(cv::countNonZero(geometry->panoramaMap.mask)) /
-                              geometry->panoramaMap.mask.total();
+            if (current.boardInput) {
+                cv::Mat combined;
+                cv::hconcat(frames[0], frames[1], combined);
+                packet.fullRaw = toImage(combined);
+            } else {
+                packet.panorama = panorama;
+                packet.sphere = toImage(sphere);
+                packet.gimbal = toImage(geometry->gimbalMap.render(frames[0], frames[1]));
+                packet.coverage = double(cv::countNonZero(geometry->panoramaMap.mask)) /
+                                  geometry->panoramaMap.mask.total();
+            }
             packet.renderMs = (now() - started) * 1000;
             if (lastFrame < 0)
                 origin = now() - position;

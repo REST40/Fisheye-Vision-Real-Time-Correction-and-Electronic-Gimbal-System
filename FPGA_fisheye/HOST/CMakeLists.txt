@@ -36,13 +36,24 @@ foreach(target host_core host_ui double_fisheye_host)
 endforeach()
 option(BUILD_X5_CAPTURE "Build the preserved, isolated X5 SDK/recorder executables" ON)
 if(BUILD_X5_CAPTURE)
+  set(CAMERA_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/dependencies/CameraSDK-2.1.1")
+  set(MEDIA_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/dependencies/MediaSDK-3.1.1")
+  foreach(sdk_file
+      "${CAMERA_ROOT}/include/camera/camera.h"
+      "${CAMERA_ROOT}/include/camera/device_discovery.h"
+      "${CAMERA_ROOT}/lib/libCameraSDK.so"
+      "${MEDIA_ROOT}/include/ins_realtime_stitcher.h"
+      "${MEDIA_ROOT}/include/ins_stitcher.h"
+      "${MEDIA_ROOT}/lib/libMediaSDK.so")
+    if(NOT EXISTS "${sdk_file}")
+      message(FATAL_ERROR "Missing X5 SDK file: ${sdk_file}\nInstall SDKs as described in dependencies/README.md, or configure with -DBUILD_X5_CAPTURE=OFF.")
+    endif()
+  endforeach()
   find_package(PkgConfig REQUIRED)
   pkg_check_modules(AV REQUIRED IMPORTED_TARGET libavcodec libavformat libavutil libswscale)
   pkg_check_modules(SDL REQUIRED IMPORTED_TARGET sdl2)
   add_executable(x5_recorder src/x5/recorder.cpp)
   target_link_libraries(x5_recorder PRIVATE PkgConfig::AV PkgConfig::SDL Threads::Threads)
-  set(CAMERA_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/dependencies/CameraSDK-2.1.1")
-  set(MEDIA_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/dependencies/MediaSDK-3.1.1")
   add_executable(x5_sdk_bridge src/x5/sdk_bridge.cpp)
   target_include_directories(x5_sdk_bridge PRIVATE "${CAMERA_ROOT}/include" "${MEDIA_ROOT}/include")
   target_link_libraries(x5_sdk_bridge PRIVATE "${CAMERA_ROOT}/lib/libCameraSDK.so" "${MEDIA_ROOT}/lib/libMediaSDK.so" Threads::Threads)

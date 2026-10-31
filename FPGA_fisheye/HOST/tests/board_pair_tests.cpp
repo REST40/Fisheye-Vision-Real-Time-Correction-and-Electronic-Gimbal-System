@@ -17,6 +17,77 @@ extern "C" {
 class BoardConnectionTests : public QObject {
     Q_OBJECT
   private slots:
+    void faultInputSurvivesDecoderTimeout() {
+        BoardConnection board;
+        const QByteArray payload(1024, 'x');
+        for (quint32 n = 0; n <= 180; ++n)
+            board.rememberInput({payload, 197 + n, 1, n * 33, 0, 100000 + n * 33});
+        QCOMPARE(board.m_recentInput.first().frame, quint32(197));
+        QCOMPARE(board.m_recentInput.size(), 181);
+        board.rememberInput({payload, 500, 1, 0, 0, 108001});
+        QVERIFY(board.m_recentInput.first().frame > 197);
+        const QByteArray large(2 * 1024 * 1024, 'y');
+        for (quint32 n = 0; n < 160; ++n)
+            board.rememberInput({large, 600 + n, 1, 0, 0, 108100 + n});
+        QVERIFY(board.m_recentInputBytes <= 256ull * 1024 * 1024);
+        QVERIFY(board.m_recentInput.size() <= 256);
+        board.resetMedia();
+        QCOMPARE(board.m_recentInputBytes, quint64(0));
+    }
+    void uploadWindowWaitsForPsReception() {
+        BoardConnection board;
+        board.m_connected = board.m_streaming = true;
+        board.m_epoch = 2;
+        board.m_upload.jpeg = QByteArray(1400 * 100, 'x');
+        board.m_upload.frame = 12;
+        board.m_upload.epoch = 2;
+        board.m_upload.count = 100;
+        board.m_upload.index = 64;
+        board.m_upload.started = MediaWire::nowMs();
+        // No socket writes or further bursts until PS drains the window.
+        board.pumpMedia();
+        QCOMPARE(board.m_upload.index, 64);
+        QCOMPARE(board.m_link.txFail, quint64(0));
+        QByteArray ack(16, 0);
+        auto *a = reinterpret_cast<uchar *>(ack.data());
+        a[0] = 0x23;
+        qToBigEndian<quint16>(65, a + 2);
+        qToBigEndian<quint32>(65, a + 12);
+        board.handleMediaControl({7, 1, 0, 2, ack, 12});
+        QCOMPARE(board.m_upload.acknowledged, 0);
+        qToBigEndian<quint16>(32, a + 2);
+        qToBigEndian<quint32>(32, a + 12);
+        board.handleMediaControl({7, 1, 0, 2, ack, 11});
+        QCOMPARE(board.m_upload.acknowledged, 0);
+        board.handleMediaControl({7, 1, 0, 2, ack, 12});
+        QCOMPARE(board.m_upload.acknowledged, 32);
+    }
+    void transmissionQualityKeepsPsFormat() {
+        QImage input(2656, 1328, QImage::Format_RGB888);
+        for (int y = 0; y < input.height(); ++y) {
+            auto *p = input.scanLine(y);
+            for (int x = 0; x < input.width(); ++x) {
+                p[x * 3] = uchar(x + y);
+                p[x * 3 + 1] = uchar(x / 3 + y / 2);
+                p[x * 3 + 2] = uchar(x / 7 + y / 3);
+            }
+        }
+        int originalBytes = 0;
+        for (int quality : {85, 65, 50}) {
+            const auto pair = MediaWire::encode(input, nullptr, quality);
+            QVERIFY(MediaWire::validInput(pair));
+            FptzJpegPair parsed{};
+            QCOMPARE(fptz_jpeg_pair_parse(reinterpret_cast<const uint8_t *>(pair.constData()),
+                                          pair.size(), &parsed), 0);
+            for (int i = 0; i < 2; ++i)
+                QCOMPARE(QImage::fromData(pair.mid(parsed.offset[i], parsed.length[i]), "jpeg").size(),
+                         QSize(1328, 1328));
+            if (quality == 85)
+                originalBytes = pair.size();
+            else
+                QVERIFY(pair.size() < originalBytes);
+        }
+    }
     void uploadWaitWindowsExcludeTests() {
         UploadWaitMeter meter;
         UploadWaitMeter::Window window;
@@ -268,6 +339,17 @@ class BoardConnectionTests : public QObject {
         for (int i = 0; i < bytes.size(); ++i)
             bytes[i] = char((i * 29 + i / 251) & 255);
         QCOMPARE(FptzProtocol::crc32(bytes), fptz_crc32(bytes.constData(), bytes.size()));
+        // Check every tail size and unaligned QByteArray view, plus a real
+        // frame-sized object, against the independent PS reference routine.
+        for (int offset = 0; offset < 8; ++offset)
+            for (int length : {0, 1, 7, 8, 9, 15, 16, 17, 63, 64, 65, 1399, 1400, 1401}) {
+                const auto view = QByteArray::fromRawData(bytes.constData() + offset, length);
+                QCOMPARE(FptzProtocol::crc32(view), fptz_crc32(view.constData(), view.size()));
+            }
+        QByteArray frame(1024 * 1024 + 7, 0);
+        for (int i = 0; i < frame.size(); ++i)
+            frame[i] = char((i * 73 + i / 251) & 255);
+        QCOMPARE(FptzProtocol::crc32(frame), fptz_crc32(frame.constData(), frame.size()));
     }
     void onlyBoardPanoramaProducesBottomViews() {
         BoardVideoService service;
@@ -289,14 +371,26 @@ class BoardConnectionTests : public QObject {
         PanoramaView renderer;
         QImage sphere, view;
         renderer.render(panorama, {0, 0, 90}, sphere, view);
-        QCOMPARE(sphere.size(), QSize(360, 360));
-        QCOMPARE(view.size(), QSize(640, 360));
-        QVERIFY(view.pixelColor(320, 180).red() > 240);
+        QCOMPARE(sphere.size(), QSize(720, 720));
+        QCOMPARE(view.size(), QSize(1280, 720));
+        QVERIFY(view.pixelColor(view.width()/2, view.height()/2).red() > 240);
         QCOMPARE(sphere.pixelColor(0, 0), QColor(Qt::black));
         renderer.render(panorama, {90, 0, 90}, sphere, view);
-        QVERIFY(view.pixelColor(320, 180).blue() > 240);
+        QVERIFY(view.pixelColor(view.width()/2, view.height()/2).blue() > 240);
         renderer.render(panorama, {-90, 0, 90}, sphere, view);
-        QVERIFY(view.pixelColor(320, 180).red() > 240 && view.pixelColor(320, 180).green() > 240);
+        QVERIFY(view.pixelColor(view.width()/2, view.height()/2).red() > 240 && view.pixelColor(view.width()/2, view.height()/2).green() > 240);
+        // Resizing with an unchanged pose must invalidate the size-specific
+        // maps, and repeated frames must preserve that high resolution.
+        renderer.render(panorama, {0, 0, 90}, sphere, view, {1152, 1152}, {1920, 1080});
+        QCOMPARE(sphere.size(), QSize(1152, 1152));
+        QCOMPARE(view.size(), QSize(1920, 1080));
+        QVERIFY(view.pixelColor(960, 540).red() > 240);
+        const auto reference = view;
+        renderer.render(panorama, {0, 0, 90}, sphere, view, {1152, 1152}, {1920, 1080});
+        QCOMPARE(view, reference);
+        renderer.render(panorama, {0, 0, 90}, sphere, view);
+        QCOMPARE(sphere.size(), QSize(720, 720));
+        QCOMPARE(view.size(), QSize(1280, 720));
     }
     void panoramaServiceDoesNotRebuildPsLutWhenDragging() {
         QUdpSocket control, input, output;
@@ -389,6 +483,16 @@ class BoardConnectionTests : public QObject {
                 if (fptz_parse_packet(reinterpret_cast<const uint8_t *>(wire.constData()),
                                       wire.size(), &h))
                     continue;
+                if ((h.chunk_index + 1) % 32 == 0 || h.chunk_index + 1 == h.chunk_count) {
+                    QByteArray ack(16, 0);
+                    auto *a = reinterpret_cast<uchar *>(ack.data());
+                    a[0] = 0x23;
+                    a[1] = h.chunk_index + 1 == h.chunk_count ? 1 : 0;
+                    qToBigEndian<quint16>(h.chunk_index + 1, a + 2);
+                    qToBigEndian<quint32>(h.chunk_index + 1, a + 12);
+                    control.writeDatagram(FptzProtocol::pack({7, 77, 0, 2, ack, h.frame_id}),
+                                          QHostAddress::LocalHost, ep.controlPort);
+                }
                 if (h.chunk_index + 1 != h.chunk_count)
                     continue;
                 uploaded = true;
@@ -447,8 +551,10 @@ class BoardConnectionTests : public QObject {
         };
         QTRY_VERIFY(pollFrame());
         QVERIFY(uploaded);
-        QVERIFY(frame.image.pixelColor(320, 180).red() > 230);
+        QCOMPARE(frame.image.size(), QSize(1280, 720));
+        QVERIFY(frame.image.pixelColor(frame.image.width()/2, frame.image.height()/2).red() > 230);
         QVERIFY(!service.takeSphere().isNull());
+        QCOMPARE(service.takePanorama().size(), QSize(2656, 1328));
         QVERIFY(frame.sampleId != 0);
         auto &tracker = service.latencyTracker();
         df::Viewport viewport;
@@ -474,7 +580,7 @@ class BoardConnectionTests : public QObject {
         frame = {};
         service.requestPose(90, 0, 90);
         QTRY_VERIFY(pollFrame());
-        QVERIFY(frame.image.pixelColor(320, 180).blue() > 230);
+        QVERIFY(frame.image.pixelColor(frame.image.width()/2, frame.image.height()/2).blue() > 230);
         viewport.setTrackedImage(frame.image, frame.sampleId, frame.renderStartedUs,
                                  frame.renderedAtUs, LatencyTracker::nowUs());
         QTest::qWait(20);
@@ -485,6 +591,15 @@ class BoardConnectionTests : public QObject {
         QVERIFY(encoding.first()[0].toDouble() > 0);
         QVERIFY(encoding.first()[1].toDouble() > 0);
         QCOMPARE(encoding.first()[2].toULongLong(), quint64(0));
+        // A window resize reprojects the retained full panorama without
+        // uploading another input or rebuilding the PS correction LUT.
+        frame = {};
+        service.setDisplaySizes(1000, 1920);
+        QTRY_VERIFY(pollFrame());
+        QCOMPARE(frame.image.size(), QSize(1920, 1080));
+        QVERIFY(frame.image.pixelColor(960, 540).blue() > 230);
+        QCOMPARE(service.takeSphere().size(), QSize(1216, 1216));
+        QCOMPARE(poseCommands, 1);
         // Both workers share a condition variable: alternating pose updates and
         // raw frames must wake the right worker and continue producing uploads.
         for (int i = 0; i < 3; ++i) {
@@ -578,6 +693,7 @@ class BoardConnectionTests : public QObject {
     }
     void dualHandshakeAndPose_data() {
         QTest::addColumn<int>("batchPackets");
+        QTest::newRow("default-thirty-two") << BoardEndpoints{}.uploadBatchPackets;
         QTest::newRow("original-eight") << 8;
         QTest::newRow("default-sixteen") << 16;
         QTest::newRow("bounded-thirty-two") << 32;
@@ -693,6 +809,19 @@ class BoardConnectionTests : public QObject {
                 const int added = fptz_rx_push(
                     &receiver, &h, reinterpret_cast<const uint8_t *>(wire.constData()) + 48);
                 valid = valid && added >= 0 && h.capture_ts_ms == 20569922;
+                if (receiver.received_count % 32 == 0 || added == 1) {
+                    uint16_t base;
+                    uint64_t mask;
+                    fptz_rx_sack(&receiver, &base, &mask);
+                    QByteArray ack(16, 0);
+                    auto *a = reinterpret_cast<uchar *>(ack.data());
+                    a[0] = 0x23;
+                    a[1] = added == 1 ? 1 : 0;
+                    qToBigEndian<quint16>(base, a + 2);
+                    qToBigEndian<quint64>(mask, a + 4);
+                    qToBigEndian<quint32>(receiver.received_count, a + 12);
+                    ps.writeDatagram(FptzProtocol::pack({7, 99, 0, 2, ack, h.frame_id}), host, port);
+                }
                 if (added == 1) {
                     FptzJpegPair parsed{};
                     valid =
@@ -723,7 +852,17 @@ class BoardConnectionTests : public QObject {
         board.pumpMedia();
         QCOMPARE(board.m_upload.index, batchPackets);
         board.m_mediaTimer.start();
-        QTRY_VERIFY(complete);
+        // Run the actual 1 ms timer; QTRY's coarse waits distort paced uploads.
+        QEventLoop uploadLoop;
+        QTimer finished;
+        connect(&finished, &QTimer::timeout, &uploadLoop, [&] {
+            if (complete)
+                uploadLoop.quit();
+        });
+        finished.start(1);
+        QTimer::singleShot(1000, &uploadLoop, &QEventLoop::quit);
+        uploadLoop.exec();
+        QVERIFY(complete);
         QVERIFY(valid);
         QCOMPARE(storage, pair);
         QTRY_COMPARE(returned.count(), 1);

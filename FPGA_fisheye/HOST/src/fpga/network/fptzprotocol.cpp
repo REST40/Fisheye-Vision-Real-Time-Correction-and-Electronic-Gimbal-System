@@ -4,19 +4,36 @@
 #include <cstring>
 namespace FptzProtocol {
 quint32 crc32(const QByteArray &bytes) {
-    static const std::array<quint32, 256> table = [] {
-        std::array<quint32, 256> result{};
-        for (quint32 byte = 0; byte < result.size(); ++byte) {
+    // Slicing by eight keeps full-frame validation from blocking UDP receive
+    // for several milliseconds. Same reflected IEEE polynomial and wire CRC.
+    static const std::array<std::array<quint32, 256>, 8> table = [] {
+        std::array<std::array<quint32, 256>, 8> result{};
+        for (quint32 byte = 0; byte < 256; ++byte) {
             quint32 value = byte;
             for (int bit = 0; bit < 8; ++bit)
                 value = (value >> 1) ^ (0xedb88320u & (0u - (value & 1u)));
-            result[byte] = value;
+            result[0][byte] = value;
         }
+        for (int slice = 1; slice < 8; ++slice)
+            for (quint32 byte = 0; byte < 256; ++byte) {
+                const auto value = result[slice - 1][byte];
+                result[slice][byte] = (value >> 8) ^ result[0][value & 255u];
+            }
         return result;
     }();
     quint32 crc = 0xffffffffu;
-    for (unsigned char byte : bytes)
-        crc = (crc >> 8) ^ table[(crc ^ byte) & 0xffu];
+    const auto *p = reinterpret_cast<const uchar *>(bytes.constData());
+    auto remaining = bytes.size();
+    while (remaining >= 8) {
+        const quint32 low = crc ^ qFromLittleEndian<quint32>(p);
+        crc = table[7][low & 255u] ^ table[6][(low >> 8) & 255u] ^
+              table[5][(low >> 16) & 255u] ^ table[4][low >> 24] ^
+              table[3][p[4]] ^ table[2][p[5]] ^ table[1][p[6]] ^ table[0][p[7]];
+        p += 8;
+        remaining -= 8;
+    }
+    while (remaining--)
+        crc = (crc >> 8) ^ table[0][(crc ^ *p++) & 255u];
     return ~crc;
 }
 QByteArray pack(const Packet &packet) {

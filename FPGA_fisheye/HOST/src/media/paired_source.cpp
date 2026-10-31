@@ -25,10 +25,13 @@ PairedSource::PairedSource(const QString &path, bool useVideo, cv::Size input)
         pts = {0};
         return;
     }
+    const auto files = pairedVideoFiles(path);
+    if (files[0].isEmpty())
+        throw std::runtime_error("目录需要一对同后缀的front/rear MP4视频");
     std::array<std::vector<double>, 2> times;
     std::array<double, 2> durations;
     for (int i = 0; i < 2; ++i) {
-        auto info = probeVideo(path + "/" + names[i] + "_10s.mp4");
+        auto info = probeVideo(path + "/" + files[i]);
         auto streams = info["streams"].toArray();
         if (streams.size() != 1)
             throw std::runtime_error("视频流数量不正确");
@@ -79,7 +82,7 @@ PairedSource::PairedSource(const QString &path, bool useVideo, cv::Size input)
             throw std::runtime_error("frames.csv帧数不同");
     }
     for (int i = 0; i < 2; ++i)
-        if (!captures[i].open((path + "/" + names[i] + "_10s.mp4").toStdString(), cv::CAP_FFMPEG))
+        if (!captures[i].open((path + "/" + files[i]).toStdString(), cv::CAP_FFMPEG))
             throw std::runtime_error("OpenCV无法打开视频");
 }
 const std::array<cv::Mat, 2> &PairedSource::read(int index) {
@@ -109,12 +112,16 @@ const std::array<cv::Mat, 2> &PairedSource::read(int index) {
 }
 QString defaultDataset(const QString &root) {
     QDir data(root + "/data/captures");
-    auto entries = data.entryInfoList({"X5_data_*"}, QDir::Dirs | QDir::NoDotAndDotDot,
+    const auto imported = data.filePath("data_source");
+    if (QFile::exists(imported + "/front.png") && QFile::exists(imported + "/rear.png") &&
+        !pairedVideoFiles(imported)[0].isEmpty())
+        return imported;
+    auto entries = data.entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot,
                                       QDir::Name | QDir::Reversed);
     for (const auto &entry : entries) {
         QDir folder(entry.absoluteFilePath());
         if (folder.exists("front.png") && folder.exists("rear.png") &&
-            folder.exists("front_10s.mp4") && folder.exists("rear_10s.mp4"))
+            !pairedVideoFiles(entry.absoluteFilePath())[0].isEmpty())
             return entry.absoluteFilePath();
     }
     return root + "/data/demo";

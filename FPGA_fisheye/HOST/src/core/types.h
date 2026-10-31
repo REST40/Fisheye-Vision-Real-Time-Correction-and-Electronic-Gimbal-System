@@ -25,7 +25,7 @@ struct FramePacket {
     bool video = false, playing = false;
     View view;
     Alignment alignment;
-    QImage raw, panorama, sphere, gimbal;
+    QImage raw, panorama, sphere, gimbal, fullRaw;
 };
 QImage toImage(const cv::Mat &image);
 QString projectRoot();

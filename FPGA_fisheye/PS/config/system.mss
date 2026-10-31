@@ -15,6 +15,7 @@ BEGIN PROCESSOR
  PARAMETER DRIVER_NAME = cpu_cortexa53
  PARAMETER DRIVER_VER = 2.0
  PARAMETER HW_INSTANCE = psu_cortexa53_0
+ PARAMETER extra_compiler_flags = -g -Wall -Wextra -fno-tree-loop-distribute-patterns -DLWIP_ALLOW_MEM_FREE_FROM_OTHER_CONTEXT=1
 END
 
 

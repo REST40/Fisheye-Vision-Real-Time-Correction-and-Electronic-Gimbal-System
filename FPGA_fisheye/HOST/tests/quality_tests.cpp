@@ -4,6 +4,7 @@
 #include "quality/qualityjob.h"
 #include "ui/imagequalitydialog.h"
 #include "ui/main_window.h"
+#include "ui/settings_dialog.h"
 #include <QBuffer>
 #include <QFile>
 #include <QGraphicsPixmapItem>
@@ -127,6 +128,20 @@ class FakeQualityBoard : public QObject {
                 }
                 pendingInput.replace(c.index * 1400, c.payload.size(), c.payload);
                 receivedChunks.insert(c.index);
+                if ((c.index + 1) % 32 == 0 || c.index + 1 == c.count) {
+                    QByteArray ack(16, 0);
+                    auto *bytes = reinterpret_cast<uchar *>(ack.data());
+                    bytes[0] = 0x23;
+                    bytes[1] = receivedChunks.size() == c.count ? 1 : 0;
+                    int contiguous = 0;
+                    while (receivedChunks.contains(contiguous))
+                        ++contiguous;
+                    qToBigEndian<quint16>(contiguous, bytes + 2);
+                    qToBigEndian<quint32>(receivedChunks.size(), bytes + 12);
+                    control.writeDatagram(
+                        FptzProtocol::pack({7, c.session, 0, c.epoch, ack, c.frame}),
+                        QHostAddress::LocalHost, ep.controlPort);
+                }
                 if (receivedChunks.size() != c.count)
                     continue;
                 auto pair = pendingInput;
@@ -465,6 +480,70 @@ class QualityTests : public QObject {
         QCOMPARE(service.latencyTracker().snapshot().counts.value("host_inputs"), quint64(0));
         service.disconnectFromBoard();
         QTRY_VERIFY(!service.isConnected());
+    }
+    void offlineRecordingQuality_data() {
+        QTest::addColumn<bool>("playing");
+        QTest::newRow("resume-playing") << true;
+        QTest::newRow("keep-paused") << false;
+    }
+    void offlineRecordingQuality() {
+        QFETCH(bool, playing);
+        const auto directory = qEnvironmentVariable("DF_OFFLINE_TEST_DATA");
+        if (directory.isEmpty())
+            QSKIP("Set DF_OFFLINE_TEST_DATA to verify recording quality input");
+        FakeQualityBoard fake;
+        df::MainWindow window(df::projectRoot(), false);
+        auto *service = window.findChild<BoardVideoService *>();
+        QVERIFY(service);
+        service->connectToBoard(fake.ep);
+        QTRY_VERIFY(service->isConnected());
+        window.settings->sourceDirectory->setText(directory);
+        window.settings->sourceMode->setCurrentIndex(0);
+        window.loadOfflineVideo();
+        QTRY_VERIFY_WITH_TIMEOUT(window.displayedFrame().has_value(), 15000);
+        QVERIFY(!window.displayedFrame()->fullRaw.isNull());
+        if (!playing) {
+            window.findChild<QPushButton *>("pauseButton")->click();
+            QTRY_VERIFY(!window.displayedFrame()->playing);
+        }
+        window.findChild<QPushButton *>("imageQualityButton")->click();
+        auto *dialog = window.findChild<ImageQualityDialog *>();
+        QVERIFY(dialog);
+        QVERIFY2(dialog->entryError().isEmpty(), qPrintable(dialog->entryError()));
+        dialog->findChild<QPushButton *>("qualityEnter")->click();
+        const auto frozen = *window.displayedFrame();
+        auto *capture = dialog->findChild<QPushButton *>("qualityCapture");
+        QTRY_VERIFY(capture->isEnabled());
+        QImage raw;
+        qint64 timestamp = -1;
+        QVERIFY(dialog->takeRaw(raw, timestamp));
+        QCOMPARE(raw, frozen.fullRaw);
+        QCOMPARE(timestamp, qRound64(frozen.pts * 1000));
+        const auto expectedInput = MediaWire::encode(frozen.fullRaw);
+        capture->click();
+        auto *job = dialog->findChild<QualityJob *>();
+        QVERIFY(job);
+        QSignalSpy done(job, &QualityJob::resultReady), errors(job, &QualityJob::failed);
+        QTRY_COMPARE_WITH_TIMEOUT(done.size(), 1, 20000);
+        QCOMPARE(errors.size(), 0);
+        QCOMPARE(fake.exactInput, expectedInput);
+        const auto result = qvariant_cast<std::shared_ptr<const Quality::Result>>(done.at(0).at(0));
+        QCOMPARE(result->cameraTimestamp, timestamp);
+        QCOMPARE(window.displayedFrame()->frame, frozen.frame);
+        dialog->findChild<QPushButton *>("qualityLeave")->click();
+        QTRY_VERIFY(service->isConnected());
+        QTRY_COMPARE(window.displayedFrame()->playing, playing);
+        if (playing)
+            QTRY_VERIFY(window.displayedFrame()->frame != frozen.frame);
+        else {
+            QTest::qWait(250);
+            QCOMPARE(window.displayedFrame()->frame, frozen.frame);
+        }
+        dialog->close();
+        window.exitSimulation();
+        window.loadSimulation();
+        QCOMPARE(dialog->entryError(), QString("请先退出软件仿真"));
+        window.close();
     }
     void offlineDialogAndButtonOrder() {
         BoardVideoService service;

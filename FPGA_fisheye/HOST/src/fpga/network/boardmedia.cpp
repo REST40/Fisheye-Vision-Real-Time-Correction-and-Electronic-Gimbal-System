@@ -9,6 +9,27 @@
 #include <algorithm>
 #include <cmath>
 #include <iterator>
+#ifdef Q_OS_LINUX
+#include <linux/sock_diag.h>
+#include <sys/socket.h>
+#endif
+
+namespace {
+// PS expires incomplete inputs at 200 ms. Leave time for its final validation.
+constexpr int uploadDeadlineMs = 180;
+}
+void BoardConnection::rememberInput(const InputRecord &record) {
+    m_recentInput.append(record);
+    m_recentInputBytes += quint64(record.jpeg.size());
+    // The board reports decoder faults only after 5 seconds. Eight frames
+    // cannot preserve that input at 30 FPS; retain 8 seconds with hard caps.
+    while (!m_recentInput.isEmpty() &&
+           (m_recentInput.size() > 256 || m_recentInputBytes > 256ull * 1024 * 1024 ||
+            record.sentAtMs - m_recentInput.first().sentAtMs > 8000)) {
+        m_recentInputBytes -= quint64(m_recentInput.first().jpeg.size());
+        m_recentInput.removeFirst();
+    }
+}
 
 QString BoardConnection::saveFaultInput(const InputRecord &record, quint32 frame, quint8 stage,
                                         quint8 reason, const QString &directory) {
@@ -54,6 +75,7 @@ void BoardConnection::resetMedia() {
     m_latencyEpoch = 0;
     m_latestSample = 0;
     m_recentInput.clear();
+    m_recentInputBytes = 0;
     m_uploadWait.reset();
     m_stageWaitWindowAt = -1;
     m_stageWaitFrames = 0;
@@ -185,8 +207,9 @@ void BoardConnection::reportLinkDiagnostics() {
                        .arg(age(m_link.creditAt))
                        .arg(m_sent.size())
                        .arg(known(m_link.creditAt, m_link.psFree));
-    line += QStringLiteral("Host上传 batch_packets=%1 batch_gap_ms=1 deadline_ms=150\n")
-                .arg(qBound(1, m_endpoints.uploadBatchPackets, 32));
+    line += QStringLiteral("Host上传 batch_packets=%1 batch_gap_ms=1 deadline_ms=%2 ack_window=64\n")
+                .arg(qBound(1, m_endpoints.uploadBatchPackets, 32))
+                .arg(uploadDeadlineMs);
     line += QStringLiteral("PS_rx=%1 PS_tx=%2 PS_complete=%3 PS_complete_bytes=%4 "
                            "heartbeat_age_ms=%5 PS_drop=%6/%7/%8/%9 result_seen=%10 "
                            "jpeg_bytes=%11/%12 stage_us=%13/%14/%15 result_age_ms=%16\n")
@@ -247,7 +270,27 @@ void BoardConnection::reportLinkDiagnostics() {
                 .arg(m_output.isValid() ? 1 : 0)
                 .arg(m_output.hasPendingDatagrams() ? 1 : 0)
                 .arg(m_link.lastRxError.isEmpty() ? QStringLiteral("none") : m_link.lastRxError);
+    QString kernelDrops = QStringLiteral("unavailable");
+#if defined(Q_OS_LINUX) && defined(SO_MEMINFO)
+    // Linux silently clamps SO_RCVBUF to net.core.rmem_max. Socket errors do
+    // not report queue overflow; read the actual kernel counter explicitly.
+    quint32 memory[SK_MEMINFO_VARS] = {};
+    socklen_t memorySize = sizeof(memory);
+    if (::getsockopt(int(m_output.socketDescriptor()), SOL_SOCKET, SO_MEMINFO,
+                     memory, &memorySize) == 0 &&
+        memorySize >= (SK_MEMINFO_DROPS + 1) * sizeof(quint32))
+        kernelDrops = QString::number(memory[SK_MEMINFO_DROPS]);
+#endif
+    line += QStringLiteral("\nRX_BUFFER requested_bytes=4194304 actual_bytes=%1 kernel_drops=%2")
+                .arg(m_output.socketOption(QAbstractSocket::ReceiveBufferSizeSocketOption).toLongLong())
+                .arg(kernelDrops);
     line += QStringLiteral("\n") + controlDiagnostic();
+    if (QDir().mkpath(m_endpoints.diagnosticsDirectory)) {
+        QSaveFile snapshot(QDir(m_endpoints.diagnosticsDirectory).filePath("latest_link.txt"));
+        const auto bytes = line.toUtf8();
+        if (snapshot.open(QIODevice::WriteOnly) && snapshot.write(bytes) == bytes.size())
+            snapshot.commit();
+    }
     emit statusChanged(line);
 }
 bool BoardConnection::sendCommand(Command &c) {
@@ -473,6 +516,24 @@ void BoardConnection::stopAndDisconnect() {
 }
 void BoardConnection::handleMediaControl(const FptzProtocol::Packet &p) {
     const auto *b = reinterpret_cast<const uchar *>(p.payload.constData());
+    // PS already reports cumulative reception and final CRC/format validation.
+    // Bound outstanding fragments so CPU/cache stalls cannot flood the pbuf pool.
+    if (p.type == 7 && p.payload.size() == 16 && p.epoch == m_epoch && m_epoch &&
+        b[0] == 0x23 && b[1] <= 2) {
+        const int base = qFromBigEndian<quint16>(b + 2);
+        const auto received = qFromBigEndian<quint32>(b + 12);
+        if (!m_upload.jpeg.isEmpty() && p.frame == m_upload.frame &&
+            base <= m_upload.index && received <= quint32(m_upload.index)) {
+            m_upload.acknowledged = qMax(m_upload.acknowledged, base);
+            if (b[1] == 2) {
+                if (m_latency)
+                    m_latency->status(m_upload.sampleId, "ps_input_rejected");
+                m_sent.remove(m_upload.frame);
+                m_upload = {};
+            }
+        }
+        return;
+    }
     if (p.type == 4 && p.txn == m_poseCommand.txn && m_poseCommand.type &&
         (p.payload.size() == 8 ||
          ((p.payload.size() == 16 || p.payload.size() == 20) && b[0] == 2)) &&
@@ -975,10 +1036,11 @@ void BoardConnection::pumpMedia() {
         if (!capacityInput)
             m_latestJpeg.clear();
         const int count = (jpeg.size() + 1399) / 1400;
-        if (((count + batchPackets - 1) / batchPackets - 1) >= 150) {
+        if (((count + batchPackets - 1) / batchPackets - 1) >= uploadDeadlineMs) {
             if (m_latency && !capacityInput)
                 m_latency->status(m_latestSample, "upload_budget_exceeded");
-            emit statusChanged(QStringLiteral("JPEG过大，上传预算超过150ms"));
+            emit statusChanged(QStringLiteral("JPEG过大，当前发送节奏超过%1ms上传预算")
+                                   .arg(uploadDeadlineMs));
             return;
         }
         if (m_sent.size() >= 128) {
@@ -1008,13 +1070,13 @@ void BoardConnection::pumpMedia() {
     }
     if (m_upload.jpeg.isEmpty() || now < m_nextBatch)
         return;
-    if (now - m_upload.started >= 150) {
+    if (now - m_upload.started >= uploadDeadlineMs) {
         ++m_link.txTimeout;
         emitUploadCounters();
         const QString diagnostic =
             QStringLiteral(
                 "一帧上传超时已丢弃，等待最新帧；session=%1 frame=%2 epoch=%3 sent_fragments=%4/%5 "
-                "jpeg_bytes=%6 elapsed_ms=%7 deadline_ms=150 dst=%8:%9")
+                "jpeg_bytes=%6 elapsed_ms=%7 deadline_ms=%10 dst=%8:%9")
                 .arg(m_session)
                 .arg(m_upload.frame)
                 .arg(m_upload.epoch)
@@ -1023,7 +1085,8 @@ void BoardConnection::pumpMedia() {
                 .arg(m_upload.jpeg.size())
                 .arg(now - m_upload.started)
                 .arg(m_endpoints.boardAddress.toString())
-                .arg(m_endpoints.boardInputPort);
+                .arg(m_endpoints.boardInputPort)
+                .arg(uploadDeadlineMs);
         if (m_latency)
             m_latency->status(m_upload.sampleId, "upload_aborted");
         m_sent.remove(m_upload.frame);
@@ -1031,7 +1094,8 @@ void BoardConnection::pumpMedia() {
         emit statusChanged(diagnostic);
         return;
     }
-    for (int n = 0; n < batchPackets && m_upload.index < m_upload.count; ++n) {
+    for (int n = 0; n < batchPackets && m_upload.index < m_upload.count &&
+                    m_upload.index - m_upload.acknowledged < 64; ++n) {
         const auto &u = m_upload;
         const auto raw = MediaWire::pack({0x23, m_session, u.frame, u.epoch, quint32(u.jpeg.size()),
                                           u.crc, quint16(u.index), quint16(u.count),
@@ -1090,10 +1154,8 @@ void BoardConnection::pumpMedia() {
         if (capacityInput)
             m_capacityBase.maxDuration = qMax(m_capacityBase.maxDuration, durationMs);
         if (!capacityInput) {
-            m_recentInput.append({m_upload.jpeg, m_upload.frame, m_upload.epoch,
-                                  m_upload.cameraTimestampMs, m_upload.crc});
-            while (m_recentInput.size() > 8)
-                m_recentInput.removeFirst();
+            rememberInput({m_upload.jpeg, m_upload.frame, m_upload.epoch,
+                           m_upload.cameraTimestampMs, m_upload.crc, MediaWire::nowMs()});
         }
         emitUploadCounters(durationMs);
         emit frameSent(m_upload.frame);

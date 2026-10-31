@@ -15,6 +15,8 @@ class BoardVideoService;
 class FrameRatePage;
 class ImageQualityDialog;
 class QDialog;
+class QGridLayout;
+class QSpinBox;
 namespace df {
 class SettingsDialog;
 class ViewPanel;
@@ -29,6 +31,7 @@ class MainWindow : public QMainWindow {
     SettingsDialog *settings;
     std::array<ViewPanel *, 4> panels;
     void loadSimulation();
+    void loadOfflineVideo();
     void exitSimulation();
     void captureEvent(const QJsonObject &data);
     bool simulationActive() const {
@@ -45,10 +48,13 @@ class MainWindow : public QMainWindow {
   private:
     ImageQualityDialog *qualityDialog = nullptr;
     bool qualityActive = false;
+    bool qualityOfflineWasPlaying = false;
     bool qualityHostPsBusy = false, qualityPipelineBusy = false, qualityReturnBusy = false;
     QPushButton *qualityButton;
     QString root, lastSaved, sessionPath, phase = "idle", pending;
     QString lastSnapshot, lastClip, lastDataset, operationMessage;
+    bool offlineBoard = false;
+    double boardReturnFps = 0;
     bool simActive = false, closing = false, snapshotPending = false, lensRequested = false,
          exportPending = false;
     quint64 generation = 0;
@@ -79,6 +85,18 @@ class MainWindow : public QMainWindow {
         *exitButton, *exportButton;
     QSlider *seek;
     void buildUi();
+    void setPresentationStep(int step);
+    void advancePresentation(int delta);
+    QGridLayout *viewGrid = nullptr;
+    QWidget *presentationControls = nullptr;
+    QWidget *statisticsBar = nullptr;
+    QLabel *presentationTitle = nullptr;
+    QPushButton *presentationButton = nullptr, *presentationPrevious = nullptr,
+                *presentationNext = nullptr, *presentationAuto = nullptr;
+    QSpinBox *presentationSeconds = nullptr;
+    QTimer presentationTimer;
+    int presentationStep = -1;
+    void loadSource(bool boardInput);
     void tick();
     void pollCameraRaw();
     void refresh();

@@ -6,6 +6,9 @@
 
 #include "lwip/pbuf.h"
 #include "lwip/udp.h"
+#include "lwip/sys.h"
+#include "netif/xadapter.h"
+#include "netif/xemacpsif.h"
 #include "xil_cache.h"
 #include "xil_io.h"
 #include "xil_printf.h"
@@ -15,6 +18,12 @@
 #include "fptz_camera.h"
 #include "fptz_scene_mask.h"
 #include "fptz_server.h"
+
+/* The GEM TX interrupt calls pbuf_free(PBUF_RAM). The NO_SYS heap mutex
+ * is a no-op, so allocation must also exclude interrupt-side mem_free. */
+#if !SYS_LIGHTWEIGHT_PROT || !LWIP_ALLOW_MEM_FREE_FROM_OTHER_CONTEXT
+#error "GEM TX requires SYS_LIGHTWEIGHT_PROT=1 and LWIP_ALLOW_MEM_FREE_FROM_OTHER_CONTEXT=1 in the BSP"
+#endif
 
 typedef struct {
     uint8_t input[FPTZ_MAX_INPUT_BYTES] __attribute__((aligned(64)));
@@ -40,6 +49,22 @@ static struct udp_pcb *control_pcb, *input_pcb, *output_pcb;
 static ip_addr_t host_ip;
 static uint8_t rx_packet[FPTZ_HEADER_SIZE + FPTZ_MAX_PAYLOAD];
 static uint8_t fault_reported;
+static uint32_t tx_backpressure_count;
+
+/* Reap completed DMA buffers before allocating a new TX pbuf. Otherwise
+ * allocation may fail before lwIP reaches its low-level TX reclamation path. */
+static void board_reclaim_tx(void) {
+    struct xemac_s *mac;
+    xemacpsif_s *gem;
+    SYS_ARCH_DECL_PROTECT(level);
+    if (!netif_default || !netif_default->state) return;
+    mac = (struct xemac_s *)netif_default->state;
+    if (mac->type != xemac_type_emacps || !mac->state) return;
+    gem = (xemacpsif_s *)mac->state;
+    SYS_ARCH_PROTECT(level);
+    process_sent_bds(gem, &(XEmacPs_GetTxRing(&gem->emacps)));
+    SYS_ARCH_UNPROTECT(level);
+}
 
 static uint64_t board_now_us(void *ctx) {
     XTime ticks;
@@ -82,12 +107,17 @@ static int board_send(void *ctx, uint16_t local_port,
     if (!pcb || (local_port != FPTZ_CONTROL_PORT &&
                  local_port != FPTZ_OUTPUT_PORT) ||
         length > FPTZ_HEADER_SIZE + FPTZ_MAX_PAYLOAD) return -1;
+    board_reclaim_tx();
     buffer = pbuf_alloc(PBUF_TRANSPORT, length, PBUF_RAM);
-    if (!buffer) return -1;
+    if (!buffer) { ++tx_backpressure_count; return FPTZ_SEND_AGAIN; }
     result = pbuf_take(buffer, packet, length);
     if (result == ERR_OK)
         result = udp_sendto(pcb, buffer, &host_ip, remote_port);
     pbuf_free(buffer);
+    if (result == ERR_MEM || result == ERR_BUF || result == ERR_WOULDBLOCK) {
+        ++tx_backpressure_count;
+        return FPTZ_SEND_AGAIN;
+    }
     return result == ERR_OK ? 0 : -1;
 }
 
@@ -232,7 +262,15 @@ int fptz_board_init(void) {
     xil_printf("FPTZ_JPEG_SCAN word_bytes=8 strict_markers=1\r\n");
     xil_printf("FPTZ_CRC_FAST slicing=8 encoder_reset_fast_poll=1\r\n");
     xil_printf("FPTZ_FLOW_DIAG version=2 heartbeat=280 normal_only=1\r\n");
-    xil_printf("FPTZ_TX_FIX finish_started=1 latest_pending=1 gap_us=1000\r\n");
+    xil_printf("FPTZ_TX_FIX finish_started=1 latest_pending=1 gap_us=%u\r\n", FPTZ_VIDEO_TX_GAP_US);
+    xil_printf("FPTZ_FULLCHAIN30 tx_reclaim=1 retry_busy=1 budget_us=%u retry_us=%u\r\n",
+               FPTZ_VIDEO_TX_BUDGET_US, FPTZ_VIDEO_TX_RETRY_US);
+#ifdef __OPTIMIZE__
+    xil_printf("FPTZ_BUILD optimized=1\r\n");
+#else
+    xil_printf("FPTZ_BUILD optimized=0\r\n");
+#endif
+    xil_printf("FPTZ_LWIP_HEAP irq_free_safe=1\r\n");
     xil_printf("FPTZ_LAT_FIX collect_before_tx=1 local_clock=1 pause_report=1\r\n");
     return 0;
 }
@@ -240,6 +278,7 @@ int fptz_board_init(void) {
 static void print_latency_stats(void) {
     const FptzLatencyStats *stats = &server.latency;
     uint32_t avg[FPTZ_LAT_PARTS] = {0};
+    xil_printf("FPTZ_TX_BACKPRESSURE retries=%u\r\n", tx_backpressure_count);
     for (unsigned i = 0; i < FPTZ_LAT_PARTS; ++i)
         if (stats->samples) avg[i] = (uint32_t)(stats->sum_us[i] / stats->samples);
     xil_printf("FPTZ_LATENCY samples=%u frame=%u avg_us rx=%u ready=%u pipe=%u outq=%u tx=%u total=%u\r\n",

@@ -90,7 +90,7 @@ bool validInput(const QByteArray &pair) {
     }
     return true;
 }
-QByteArray encode(const QImage &image, QString *error) {
+QByteArray encode(const QImage &image, QString *error, int quality) {
     auto fail = [error](const QString &message) {
         if (error)
             *error = message;
@@ -105,7 +105,7 @@ QByteArray encode(const QImage &image, QString *error) {
         QBuffer buffer(&lens[i]);
         buffer.open(QIODevice::WriteOnly);
         QImageWriter writer(&buffer, "jpeg");
-        writer.setQuality(85);
+        writer.setQuality(qBound(50, quality, 95));
         writer.setOptimizedWrite(false);
         writer.setProgressiveScanWrite(false);
         // RGB888 camera frames can expose a read-only lens window without copying

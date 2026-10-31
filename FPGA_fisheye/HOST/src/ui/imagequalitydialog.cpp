@@ -45,6 +45,7 @@ ImageQualityDialog::ImageQualityDialog(BoardVideoService *service, QWidget *pare
     enter->setObjectName("qualityEnter");
     capture = new QPushButton("采集并分析");
     capture->setObjectName("qualityCapture");
+    capture->setToolTip("取当前相机或离线录像的完整双鱼眼帧，发送至PS/PL，与同帧软件参考比较");
     leave = new QPushButton("结束测试并恢复视频");
     leave->setObjectName("qualityLeave");
     save = new QPushButton("保存结果");
@@ -147,7 +148,7 @@ ImageQualityDialog::ImageQualityDialog(BoardVideoService *service, QWidget *pare
         QImage raw;
         qint64 timestamp = 0;
         if (!takeRaw || !takeRaw(raw, timestamp)) {
-            status->setText("相机没有新的完整双鱼眼帧，请稍后重试。");
+            status->setText("当前输入没有完整双鱼眼帧，请先连接相机或加载离线视频。");
             return;
         }
         auto *next = new QualityJob(this);

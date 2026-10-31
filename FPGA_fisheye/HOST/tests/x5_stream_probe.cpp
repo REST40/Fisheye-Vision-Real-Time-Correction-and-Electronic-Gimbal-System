@@ -19,6 +19,10 @@ int main(int argc, char **argv) {
     QJsonObject report;
     QString error, path;
     int frames = 0;
+    const bool withBoard = qEnvironmentVariableIntValue("DF_X5_WITH_BOARD") == 1;
+    const int testSeconds = qBound(0, qEnvironmentVariableIntValue("DF_X5_TEST_SECONDS"), 60);
+    int returned = 0;
+    qint64 firstInputAt = -1, lastInputAt = -1, firstReturnAt = -1, lastReturnAt = -1;
     bool stopping = false;
     qint64 last = -1;
     QTimer timer;
@@ -38,11 +42,19 @@ int main(int argc, char **argv) {
     QObject::connect(&capture, &df::CaptureService::ended, &app, [&](int code) {
         if (code && error.isEmpty())
             error = "camera process failed";
-        report["passed"] = error.isEmpty() && frames >= 10;
+        report["passed"] = error.isEmpty() && frames >= 10 && (!withBoard || returned >= 10);
         report["frames_checked"] = frames;
         report["local_fisheye_rendering_disabled"] = true;
         report["error"] = error;
         report["elapsed_ms"] = elapsed.elapsed();
+        report["camera_input_fps"] = lastInputAt > firstInputAt
+            ? (frames - 1) * 1000. / (lastInputAt - firstInputAt) : 0.;
+        report["board_return_fps"] = lastReturnAt > firstReturnAt
+            ? (returned - 1) * 1000. / (lastReturnAt - firstReturnAt) : 0.;
+        report["board_frames"] = returned;
+        report["with_board"] = withBoard;
+        report["input_jpeg_quality"] = 85;
+        renderer.disconnectFromBoard();
         df::writeJson(root + "/build/verification/realtime_probe.json", report);
         std::cout << QJsonDocument(report).toJson().constData();
         app.exit(report["passed"].toBool() ? 0 : 1);
@@ -62,6 +74,9 @@ int main(int argc, char **argv) {
                 return;
             }
             last = timestamp;
+            lastInputAt = elapsed.elapsed();
+            if (firstInputAt < 0)
+                firstInputAt = lastInputAt;
             ++frames;
             renderer.submit(raw, timestamp);
             if (frames == 1) {
@@ -83,14 +98,23 @@ int main(int argc, char **argv) {
                 report["ps_jpeg_validator_passed"] = true;
             }
         }
-        if (!renderer.takeSphere().isNull() || !renderer.takeDisplay().image.isNull()) {
+        const auto display = renderer.takeDisplay();
+        const auto sphere = renderer.takeSphere();
+        if (withBoard && !display.image.isNull()) {
+            lastReturnAt = elapsed.elapsed();
+            if (firstReturnAt < 0)
+                firstReturnAt = lastReturnAt;
+            ++returned;
+        }
+        if (!withBoard && (!sphere.isNull() || !display.image.isNull())) {
             error = "bottom views must wait for board panorama";
             stop();
             return;
         }
-        if (frames >= 10)
+        if ((!testSeconds && frames >= 10) ||
+            (testSeconds && firstInputAt >= 0 && elapsed.elapsed() - firstInputAt >= testSeconds * 1000))
             stop();
-        if (elapsed.elapsed() > 30000) {
+        if (!frames && elapsed.elapsed() > 30000) {
             error = "camera readiness timeout";
             stop();
         }
@@ -106,8 +130,11 @@ int main(int argc, char **argv) {
     config["seconds"] = 0;
     QDir().mkpath(root + "/build/verification");
     capture.start(config);
-    timer.start(50);
-    QTimer::singleShot(60000, &app, [&] {
+    if (withBoard)
+        renderer.connectToBoard();
+    timer.setTimerType(Qt::PreciseTimer);
+    timer.start(4);
+    QTimer::singleShot(90000, &app, [&] {
         if (!stopping)
             error = "overall timeout";
         app.exit(1);

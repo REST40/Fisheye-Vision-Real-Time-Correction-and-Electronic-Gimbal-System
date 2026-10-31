@@ -20,7 +20,7 @@ struct BoardEndpoints {
     int helloTimeoutMs = 3000, idleTimeoutMs = 3500, retryIntervalMs = 500;
     int commandTimeoutMs = 10000;
     // Bounded UDP bursts, yielding between batches for PS RX/media scheduling.
-    int uploadBatchPackets = 16;
+    int uploadBatchPackets = 32;
     QString diagnosticsDirectory = QStringLiteral("output/diagnostics");
 };
 
@@ -157,6 +157,7 @@ class BoardConnection final : public QObject {
         int writeStalls = 0;
         quint32 cameraTimestampMs = 0;
         quint64 sampleId = 0;
+        int acknowledged = 0;
     };
     struct Sent {
         quint32 epoch = 0;
@@ -166,8 +167,11 @@ class BoardConnection final : public QObject {
     struct InputRecord {
         QByteArray jpeg;
         quint32 frame = 0, epoch = 0, cameraTimestamp = 0, crc = 0;
+        qint64 sentAtMs = 0;
     };
     QList<InputRecord> m_recentInput;
+    quint64 m_recentInputBytes = 0;
+    void rememberInput(const InputRecord &record);
     QString saveFaultInput(const InputRecord &record, quint32 frame, quint8 stage, quint8 reason,
                            const QString &directory);
     Upload m_upload;

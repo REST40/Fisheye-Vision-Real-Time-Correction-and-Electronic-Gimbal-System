@@ -57,6 +57,15 @@ SettingsDialog::SettingsDialog(const QString &path, QWidget *parent) : QDialog(p
     sourceMode->addItem("前后视频 · 循环播放", true);
     sourceMode->addItem("前后照片 · 静态仿真", false);
     form->addWidget(sourceMode);
+    form->addWidget(caption("离线视频上传画质"));
+    offlineQuality = new QComboBox;
+    offlineQuality->setObjectName("offlineJpegQuality");
+    offlineQuality->addItem("低细节预览 · 平滑与JPEG压缩", 50);
+    offlineQuality->addItem("均衡画质与帧率", 65);
+    offlineQuality->addItem("原画质 · JPEG质量85", 85);
+    offlineQuality->setCurrentIndex(2);
+    offlineQuality->setToolTip("低细节预览会用13×13高斯平滑（σ=3）减少细节，并使用JPEG质量50；均衡为65，原画质为85且不平滑。前后镜头仍各为1328×1328，PS/PL处理不变。");
+    form->addWidget(offlineQuality);
     loadButton = action("加载软件仿真");
     loadButton->setObjectName("yellow");
     connect(loadButton, &QPushButton::clicked, this, &SettingsDialog::loadRequested);

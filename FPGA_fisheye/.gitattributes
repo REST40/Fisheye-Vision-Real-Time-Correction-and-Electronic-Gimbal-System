@@ -1,6 +1,9 @@
-# Preserve the delivered source bytes and SHA-256 across Git checkouts.
+# Preserve reference-source fingerprints across platforms.
 * -text
-*.xsa binary
+*.sh text eol=lf
+*.py text eol=lf
+*.tcl text eol=lf
 *.png binary
 *.jpg binary
+*.jpeg binary
 *.pdf binary

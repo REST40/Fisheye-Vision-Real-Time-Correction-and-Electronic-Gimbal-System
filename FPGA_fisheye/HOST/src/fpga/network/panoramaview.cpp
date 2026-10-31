@@ -19,17 +19,29 @@ void PanoramaView::maps(const cv::Mat &rays, cv::Mat &mx, cv::Mat &my) {
         }
 }
 void PanoramaView::render(const QImage &panorama, const df::View &view, QImage &sphere,
-                          QImage &perspective) {
+                          QImage &perspective, QSize sphereSize, QSize perspectiveSize) {
     if (panorama.isNull()) {
         sphere = {};
         perspective = {};
         return;
     }
-    if (!ready || source != panorama.size() || !(view == previous)) {
+    const bool changed = !ready || source != panorama.size() || !(view == previous);
+    if (changed || sphereSize != sphereResolution || perspectiveSize != viewResolution) {
         source = panorama.size();
         previous = view;
-        maps(df::sphereRays({360, 360}, view, domain), sphereX, sphereY);
-        maps(df::perspectiveRays({640, 360}, view), viewX, viewY);
+        cv::Mat x, y;
+        if (changed || sphereSize != sphereResolution) {
+            maps(df::sphereRays({sphereSize.width(), sphereSize.height()}, view, domain), x, y);
+            // Cached fixed-point maps use the same bilinear interpolation,
+            // with less per-frame work at presentation resolutions.
+            cv::convertMaps(x, y, sphereX, sphereY, CV_16SC2);
+            sphereResolution = sphereSize;
+        }
+        if (changed || perspectiveSize != viewResolution) {
+            maps(df::perspectiveRays({perspectiveSize.width(), perspectiveSize.height()}, view), x, y);
+            cv::convertMaps(x, y, viewX, viewY, CV_16SC2);
+            viewResolution = perspectiveSize;
+        }
         ready = true;
     }
     auto rgb = panorama.convertToFormat(QImage::Format_RGB888);

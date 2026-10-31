@@ -4,10 +4,12 @@
 #include "imagequalitydialog.h"
 #include "latencyanalysispage.h"
 #include "media/video_probe.h"
+#include "path_dialog.h"
 #include "settings_dialog.h"
 #include "simulation/simulation_service.h"
 #include "view_panel.h"
 #include "x5/capture_service.h"
+#include <QApplication>
 #include <QCloseEvent>
 #include <QDateTime>
 #include <QDesktopServices>
@@ -19,6 +21,8 @@
 #include <QJsonDocument>
 #include <QPlainTextEdit>
 #include <QScrollArea>
+#include <QShortcut>
+#include <QSpinBox>
 #include <QThread>
 #include <QUrl>
 #include <QVBoxLayout>
@@ -50,7 +54,7 @@ MainWindow::MainWindow(QString path, bool autoplay, QWidget *parent)
     setupAnalysis();
     connect(settings->findChild<QPushButton *>("connectBoardButton"), &QPushButton::clicked, this,
             [this] {
-                if (simActive) {
+                if (simActive && !offlineBoard) {
                     message("请先退出仿真再连接PS", true);
                     return;
                 }
@@ -67,11 +71,21 @@ MainWindow::MainWindow(QString path, bool autoplay, QWidget *parent)
         settings->findChild<QPushButton *>("connectBoardButton")->setEnabled(!connected);
         settings->hfov->setEnabled(true);
         if (!connected) {
+            boardReturnFps = 0;
+            if (offlineBoard) {
+                for (int i : {1, 2, 3}) {
+                    panels[i]->viewport->clear();
+                    panels[i]->timestamp->setText("—");
+                    panels[i]->sizeLabel->setText("等待PS/PL回图");
+                }
+            }
             panels[2]->viewport->clear();
             panels[3]->viewport->clear();
             panels[2]->sizeLabel->setText("等待PS全景回图");
             panels[3]->sizeLabel->setText("等待PS全景回图");
         }
+        if (connected && offlineBoard && displayed && !displayed->fullRaw.isNull())
+            board->submit(displayed->fullRaw, qRound64(displayed->pts * 1000));
         message(connected ? "PS已连接，准备固定360°全景LUT" : "PS已断开");
     });
     connect(board, &BoardVideoService::poseResolved, this,
@@ -83,9 +97,15 @@ MainWindow::MainWindow(QString path, bool autoplay, QWidget *parent)
             this, [this] { showParameters(); });
     clock.start();
     connect(settings, &SettingsDialog::loadRequested, this, &MainWindow::loadSimulation);
+    connect(settings->offlineQuality, qOverload<int>(&QComboBox::currentIndexChanged), this,
+            [this] {
+                if (offlineBoard)
+                    board->setInputJpegQuality(settings->offlineQuality->currentData().toInt(),
+                                               settings->offlineQuality->currentData().toInt() == 50);
+            });
     connect(settings->sourceMode, qOverload<int>(&QComboBox::currentIndexChanged), this, [this] {
         if (simActive)
-            loadSimulation();
+            loadSource(offlineBoard);
     });
     connect(settings, &SettingsDialog::viewChanged, this, &MainWindow::viewChanged);
     connect(settings, &SettingsDialog::alignmentChanged, this, [this] {
@@ -161,8 +181,10 @@ MainWindow::~MainWindow() {
 void MainWindow::setupAnalysis() {
     qualityDialog = new ImageQualityDialog(board, this);
     qualityDialog->entryError = [this]() -> QString {
-        if (simActive)
+        if (simActive && !offlineBoard)
             return "请先退出软件仿真";
+        if (offlineBoard && (!displayed || displayed->fullRaw.isNull()))
+            return "离线视频尚未读取到完整双鱼眼帧，请等待加载完成后重试";
         if (live["recording"].toBool() || phase == "recording" || lensRequested ||
             live["lens_busy"].toBool() || snapshotPending || !pending.isEmpty())
             return "请等待录制、截图或十秒采集完成后再进入独立测试";
@@ -172,6 +194,11 @@ void MainWindow::setupAnalysis() {
         return {};
     };
     qualityDialog->takeRaw = [this](QImage &image, qint64 &timestamp) {
+        if (offlineBoard && displayed && !displayed->fullRaw.isNull()) {
+            image = displayed->fullRaw;
+            timestamp = qRound64(displayed->pts * 1000);
+            return true;
+        }
         return capture->running() && capture->fullRaw(image, timestamp);
     };
     connect(qualityButton, &QPushButton::clicked, this, [this] {
@@ -182,9 +209,18 @@ void MainWindow::setupAnalysis() {
     connect(qualityDialog, &ImageQualityDialog::modeChanged, this, [this](bool active) {
         qualityActive = active;
         if (active) {
+            qualityOfflineWasPlaying = offlineBoard && displayed && displayed->playing;
+            if (offlineBoard) {
+                simulation->setPlaying(false);
+                simulation->seek(displayed->pts);
+            }
             cameraPoll.stop();
             timer.stop();
         } else {
+            if (offlineBoard)
+                simulation->setPlaying(qualityOfflineWasPlaying);
+            qualityOfflineWasPlaying = false;
+            frameTimes.clear();
             cameraRateClock.invalidate();
             lastCameraSequence = 0;
             cameraPoll.start();
@@ -199,7 +235,10 @@ void MainWindow::setupAnalysis() {
     connect(board, &BoardVideoService::psHostRateTestRunningChanged, this,
             [this](bool v) { qualityReturnBusy = v; });
     connect(capture, &CaptureService::ended, this,
-            [this](int) { qualityDialog->cancelSample("相机断开，当前采样已取消"); });
+            [this](int) {
+                if (!offlineBoard)
+                    qualityDialog->cancelSample("相机断开，当前采样已取消");
+            });
 
     linkDialog = new QDialog(this);
     linkDialog->setObjectName("linkAnalysisDialog");
@@ -278,6 +317,8 @@ void MainWindow::setupAnalysis() {
     });
     connect(board, &BoardVideoService::pipelineRatesChanged, linkPage,
             &FrameRatePage::setBoardRates);
+    connect(board, &BoardVideoService::pipelineRatesChanged, this,
+            [this](double, double returned, double) { boardReturnFps = returned; });
     connect(board, &BoardVideoService::psReceiveWindowChanged, linkPage,
             &FrameRatePage::setPsReceiveWindow);
     connect(board, &BoardVideoService::psPipelineWindowChanged, linkPage,
@@ -366,6 +407,32 @@ void MainWindow::buildUi() {
     connectButton->setProperty("role", "connect");
     connect(connectButton, &QPushButton::clicked, this, &MainWindow::connectCamera);
     top->addWidget(connectButton);
+    auto *offlineButton = button("选择离线视频");
+    offlineButton->setObjectName("offlineVideoButton");
+    connect(offlineButton, &QPushButton::clicked, this, [this] {
+        if (qualityActive || capture->running() || phase != "idle") {
+            message("请先结束当前任务并断开X5，再加载离线视频。");
+            return;
+        }
+        auto path = selectProjectDirectory(this, "选择已处理的前后同步视频目录",
+                                           settings->sourceDirectory->text());
+        if (path.isEmpty())
+            return;
+        for (const auto &name : {"front.png", "rear.png"}) {
+            if (!QFile::exists(path + "/" + name)) {
+                message("目录缺少 " + QString(name) + "，请选择转换后的同步视频目录。");
+                return;
+            }
+        }
+        if (pairedVideoFiles(path)[0].isEmpty()) {
+            message("目录需要一对同后缀的前后视频，例如 front_64s.mp4 和 rear_64s.mp4。");
+            return;
+        }
+        settings->sourceDirectory->setText(path);
+        settings->sourceMode->setCurrentIndex(0);
+        loadOfflineVideo();
+    });
+    top->addWidget(offlineButton);
     recordButton = button("● 开始双路录制");
     recordButton->setObjectName("recordButton");
     connect(recordButton, &QPushButton::clicked, this, &MainWindow::record);
@@ -403,9 +470,27 @@ void MainWindow::buildUi() {
     fpgaButton->setFixedWidth(78);
     connect(fpgaButton, &QPushButton::clicked, this, [this] { settings->openPage(4); });
     nav->addWidget(fpgaButton);
+    presentationButton = button("演示\n模式");
+    presentationButton->setObjectName("presentationButton");
+    presentationButton->setCheckable(true);
+    presentationButton->setFixedWidth(78);
+    connect(presentationButton, &QPushButton::toggled, this, [this](bool enabled) {
+        presentationTimer.stop();
+        presentationAuto->setChecked(false);
+        presentationControls->setVisible(enabled);
+        pages->setCurrentIndex(0);
+        setPresentationStep(enabled ? 0 : -1);
+    });
+    nav->addWidget(presentationButton);
     nav->addStretch();
     body->addLayout(nav);
     pages = new QStackedWidget;
+    connect(pages, &QStackedWidget::currentChanged, this, [this](int page) {
+        if (page != 0 && presentationAuto) {
+            presentationTimer.stop();
+            presentationAuto->setChecked(false);
+        }
+    });
     body->addWidget(pages, 1);
     outer->addLayout(body, 1);
     connect(liveButton, &QPushButton::clicked, this, [this] { pages->setCurrentIndex(0); });
@@ -418,6 +503,7 @@ void MainWindow::buildUi() {
     center->setContentsMargins(0, 0, 0, 0);
     center->setSpacing(12);
     auto *stats = new QFrame;
+    statisticsBar = stats;
     stats->setObjectName("metrics");
     auto *grid = new QGridLayout(stats);
     grid->setContentsMargins(18, 8, 18, 8);
@@ -431,7 +517,68 @@ void MainWindow::buildUi() {
         grid->setColumnStretch(i, 1);
     }
     center->addWidget(stats);
-    auto *views = new QGridLayout;
+    presentationControls = new QFrame;
+    presentationControls->setObjectName("presentationControls");
+    auto *presentationBar = new QHBoxLayout(presentationControls);
+    presentationBar->setContentsMargins(0, 0, 0, 0);
+    presentationTitle = text("", "section");
+    presentationTitle->setObjectName("presentationTitle");
+    presentationBar->addWidget(presentationTitle, 1);
+    presentationPrevious = button("← 上一步", "presentationPrevious");
+    presentationNext = button("下一步 →", "presentationNext");
+    auto *overview = button("四屏总览", "presentationOverview");
+    presentationAuto = button("自动播放", "presentationAuto");
+    presentationAuto->setCheckable(true);
+    presentationSeconds = new QSpinBox;
+    presentationSeconds->setObjectName("presentationSeconds");
+    presentationSeconds->setRange(2, 60);
+    presentationSeconds->setValue(8);
+    presentationSeconds->setSuffix(" 秒 / 步");
+    for (auto *control : {presentationPrevious, presentationNext, overview, presentationAuto})
+        presentationBar->addWidget(control);
+    presentationBar->addWidget(presentationSeconds);
+    auto *exitPresentation = button("退出演示", "exitPresentation");
+    presentationBar->addWidget(exitPresentation);
+    connect(presentationPrevious, &QPushButton::clicked, this, [this] { advancePresentation(-1); });
+    connect(presentationNext, &QPushButton::clicked, this, [this] { advancePresentation(1); });
+    connect(overview, &QPushButton::clicked, this, [this] {
+        presentationTimer.stop();
+        presentationAuto->setChecked(false);
+        setPresentationStep(4);
+    });
+    connect(exitPresentation, &QPushButton::clicked, this, [this] {
+        presentationButton->setChecked(false);
+    });
+    connect(presentationAuto, &QPushButton::toggled, this, [this](bool enabled) {
+        presentationAuto->setText(enabled ? "停止自动" : "自动播放");
+        if (enabled) {
+            if (presentationStep == 4)
+                setPresentationStep(0);
+            presentationTimer.start(presentationSeconds->value() * 1000);
+        } else
+            presentationTimer.stop();
+    });
+    connect(presentationSeconds, &QSpinBox::valueChanged, this, [this](int seconds) {
+        if (presentationTimer.isActive())
+            presentationTimer.start(seconds * 1000);
+    });
+    connect(&presentationTimer, &QTimer::timeout, this, [this] {
+        setPresentationStep(presentationStep + 1);
+    });
+    auto shortcut = [this](const QKeySequence &key, auto action) {
+        auto *keys = new QShortcut(key, this);
+        connect(keys, &QShortcut::activated, this, [this, action] {
+            if (presentationButton->isChecked() && pages->currentIndex() == 0 &&
+                isActiveWindow() && !QApplication::activeModalWidget())
+                action();
+        });
+    };
+    shortcut(QKeySequence(Qt::Key_Left), [this] { advancePresentation(-1); });
+    shortcut(QKeySequence(Qt::Key_Right), [this] { advancePresentation(1); });
+    shortcut(QKeySequence(Qt::Key_Escape), [this] { presentationButton->setChecked(false); });
+    presentationControls->hide();
+    center->addWidget(presentationControls);
+    auto *views = viewGrid = new QGridLayout;
     views->setSpacing(12);
     panels = {new ViewPanel("校正前", "原始双鱼眼"), new ViewPanel("校正后", "360°全景"),
               new ViewPanel("球体显示", "外部全景球 · 与云台联动"),
@@ -525,13 +672,27 @@ void MainWindow::buildUi() {
     list->addWidget(libraryStatus);
     pages->addWidget(libraryPage);
 }
+void MainWindow::loadOfflineVideo() {
+    if (qualityActive || capture->running() || phase != "idle")
+        return;
+    loadSource(true);
+}
 void MainWindow::loadSimulation() {
+    loadSource(false);
+}
+void MainWindow::loadSource(bool boardInput) {
     if (qualityActive)
         return;
     if (capture->running() || phase != "idle") {
         message("请先断开X5，再加载软件仿真。");
         return;
     }
+    if (offlineBoard && !boardInput)
+        board->disconnectFromBoard();
+    offlineBoard = boardInput;
+    boardReturnFps = 0;
+    board->setInputJpegQuality(offlineBoard ? settings->offlineQuality->currentData().toInt() : 85,
+                               offlineBoard && settings->offlineQuality->currentData().toInt() == 50);
     if (!simulation->isRunning())
         simulation->start();
     simActive = true;
@@ -539,18 +700,37 @@ void MainWindow::loadSimulation() {
     frameTimes.clear();
     exportPending = false;
     generation = simulation->load(settings->sourceDirectory->text(),
-                                  settings->sourceMode->currentData().toBool());
+                                  settings->sourceMode->currentData().toBool(), offlineBoard);
     simulation->setView(settings->view());
     simulation->setAlignment(settings->alignment());
     settings->simulationStatus->setText("正在核对前后时间戳并生成映射…");
     QStringList names{"显示帧率", "当前视频帧", "播放位置"};
+    if (offlineBoard)
+        names[0] = "输入 / 板卡回图 FPS";
     for (int i = 0; i < 3; ++i)
         captions[i]->setText(names[i]);
-    message("正在加载C++软件仿真…");
+    if (offlineBoard) {
+        for (int i : {1, 2, 3}) {
+            panels[i]->viewport->clear();
+            panels[i]->sizeLabel->setText("等待PS/PL回图");
+            panels[i]->timestamp->setText("—");
+        }
+        panels[1]->caption->setText("PS/PL校正拼接全景 · 等待网线回传");
+        board->requestPose(settings->view().yaw, settings->view().pitch, settings->view().hfov);
+        if (!board->isConnected() && !board->isConnecting())
+            board->connectToBoard();
+        message("离线录像 → 网线上传PS/PL；校正结果仅显示板卡回图。");
+    } else {
+        message("正在加载C++软件仿真…");
+    }
     refresh();
 }
 void MainWindow::exitSimulation() {
     simulation->unload();
+    if (offlineBoard)
+        board->disconnectFromBoard();
+    offlineBoard = false;
+    board->setInputJpegQuality(85);
     simActive = false;
     displayed.reset();
     frameTimes.clear();
@@ -571,7 +751,7 @@ void MainWindow::exitSimulation() {
     refresh();
 }
 void MainWindow::viewChanged() {
-    if (simActive)
+    if (simActive && !offlineBoard)
         simulation->setView(settings->view());
     else {
         auto view = settings->view();
@@ -604,25 +784,35 @@ void MainWindow::render(const FramePacket &frame) {
     bool first = !displayed;
     bool changed = first || frame.frame != displayed->frame;
     displayed = frame;
-    if (first)
+    if (first && !offlineBoard)
         message("C++软件仿真 · 前后按180°假设拼接；拖动球体或云台，滚轮调整视场。");
-    std::array<QImage, 4> images{frame.raw, frame.panorama, frame.sphere, frame.gimbal};
-    for (int i = 0; i < 4; ++i)
-        panels[i]->viewport->setImage(images[i]);
-    panels[0]->sizeLabel->setText("前后各1328 × 1328");
-    panels[1]->sizeLabel->setText("1920 × 960 · 仿真");
-    panels[2]->sizeLabel->setText("外部球体");
-    panels[3]->sizeLabel->setText("640 × 360");
-    for (int i : {0, 1})
-        panels[i]->timestamp->setText(QString::number(frame.pts, 'f', 3) + " s");
-    panels[0]->caption->setText("前镜头（左） · 后镜头（右）");
-    panels[1]->caption->setText("软件校正与拼接全景");
-    panels[2]->timestamp->setText(QString("偏航 %1°").arg(frame.view.yaw, 0, 'f', 1));
-    panels[3]->caption->setText(QString("偏航%1° · 俯仰%2° · 视场%3°")
-                                    .arg(frame.view.yaw, 0, 'f', 1)
-                                    .arg(frame.view.pitch, 0, 'f', 1)
-                                    .arg(frame.view.hfov, 0, 'f', 0));
-    panels[3]->timestamp->setText("拖动 / 滚轮");
+    if (offlineBoard) {
+        panels[0]->viewport->setImage(frame.raw);
+        panels[0]->sizeLabel->setText("前后各1328 × 1328 · 录像输入");
+        panels[0]->caption->setText("前镜头（左） · 后镜头（右） → PS/PL");
+        panels[0]->timestamp->setText(QString::number(frame.pts, 'f', 3) + " s");
+        if (changed && !frame.fullRaw.isNull())
+            board->submit(frame.fullRaw, qRound64(frame.pts * 1000));
+    } else {
+        std::array<QImage, 4> images{frame.raw, frame.panorama, frame.sphere, frame.gimbal};
+        for (int i = 0; i < 4; ++i)
+            panels[i]->viewport->setImage(images[i]);
+        panels[0]->sizeLabel->setText("前后各1328 × 1328");
+        panels[1]->sizeLabel->setText("1920 × 960 · 仿真");
+        panels[2]->sizeLabel->setText("软件仿真 · 球体");
+        panels[3]->sizeLabel->setText("640 × 360 · 软件仿真");
+        for (int i : {0, 1})
+            panels[i]->timestamp->setText(QString::number(frame.pts, 'f', 3) + " s");
+        panels[0]->caption->setText("前镜头（左） · 后镜头（右）");
+        panels[1]->caption->setText("软件校正与拼接全景");
+        panels[2]->caption->setText("电脑软件校正拼接 · 球面展示");
+        panels[2]->timestamp->setText(QString("偏航 %1°").arg(frame.view.yaw, 0, 'f', 1));
+        panels[3]->caption->setText(QString("偏航%1° · 俯仰%2° · 视场%3°")
+                                        .arg(frame.view.yaw, 0, 'f', 1)
+                                        .arg(frame.view.pitch, 0, 'f', 1)
+                                        .arg(frame.view.hfov, 0, 'f', 0));
+        panels[3]->timestamp->setText("拖动 / 滚轮");
+    }
     if (frame.playing && changed) {
         frameTimes.push_back(clock.elapsed() / 1000.);
         while (frameTimes.size() > 90)
@@ -631,20 +821,29 @@ void MainWindow::render(const FramePacket &frame) {
     double rate = frame.playing && frameTimes.size() > 1
                       ? (frameTimes.size() - 1) / (frameTimes.back() - frameTimes.front())
                       : 0;
-    metrics[0]->setText(QString::number(rate, 'f', 1));
+    metrics[0]->setText(offlineBoard
+                           ? QString("%1 / %2").arg(rate, 0, 'f', 1).arg(boardReturnFps, 0, 'f', 1)
+                           : QString::number(rate, 'f', 1));
     metrics[1]->setText(QString("%1 / %2").arg(frame.frame + 1).arg(frame.count));
     metrics[2]->setText(QString::number(frame.pts, 'f', 2) + " s");
     if (!seek->isSliderDown())
         seek->setValue(frame.duration ? qRound(frame.pts / frame.duration * 9999) : 0);
     pauseButton->setText(frame.playing ? "暂停" : "播放");
-    settings->simulationStatus->setText(QString("%1\n渲染 %2 ms · 有效覆盖 %3%（不代表标定准确度）")
-                                            .arg(frame.video
-                                                     ? QString("视频源 %1 fps · 显示 %2 fps")
-                                                           .arg(frame.sourceFps, 0, 'f', 2)
-                                                           .arg(rate, 0, 'f', 1)
-                                                     : "照片仿真 · 可拖动视角")
-                                            .arg(frame.renderMs, 0, 'f', 1)
-                                            .arg(frame.coverage * 100, 0, 'f', 1));
+    if (offlineBoard)
+        settings->simulationStatus->setText(
+            QString("录像输入 %1 fps · 网线上传PS/PL · %2\n%3\n暂停与跳转控制输入录像；校正画面来自板卡回传。")
+                .arg(frame.sourceFps, 0, 'f', 2)
+                .arg(board->isConnected() ? "PS已连接" : "等待PS连接")
+                .arg(settings->offlineQuality->currentText()));
+    else
+        settings->simulationStatus->setText(QString("%1\n渲染 %2 ms · 有效覆盖 %3%（不代表标定准确度）")
+                                                .arg(frame.video
+                                                         ? QString("视频源 %1 fps · 显示 %2 fps")
+                                                               .arg(frame.sourceFps, 0, 'f', 2)
+                                                               .arg(rate, 0, 'f', 1)
+                                                         : "照片仿真 · 可拖动视角")
+                                                .arg(frame.renderMs, 0, 'f', 1)
+                                                .arg(frame.coverage * 100, 0, 'f', 1));
     refresh();
 }
 void MainWindow::pollCameraRaw() {
@@ -682,6 +881,19 @@ void MainWindow::pollCameraRaw() {
 void MainWindow::tick() {
     if (qualityActive)
         return;
+    // The codec worker samples the full PS panorama directly at display
+    // resolution. Hidden panels keep the baseline rather than a stale
+    // fullscreen allocation after leaving a presentation step.
+    auto *sphereViewport = panels[2]->viewport;
+    auto *perspectiveViewport = panels[3]->viewport;
+    int sphereDiameter = sphereViewport->isVisible()
+        ? qRound(std::min(sphereViewport->width(), sphereViewport->height()) *
+                 sphereViewport->devicePixelRatioF()) : 0;
+    int perspectiveWidth = perspectiveViewport->isVisible()
+        ? qRound(std::min(double(perspectiveViewport->width()),
+                          perspectiveViewport->height() * 16. / 9.) *
+                 perspectiveViewport->devicePixelRatioF()) : 0;
+    board->setDisplaySizes(sphereDiameter, perspectiveWidth);
     if (auto packet = simulation->poll())
         render(*packet);
     QImage raw, pano;
@@ -694,18 +906,26 @@ void MainWindow::tick() {
     }
     if (cameraSampleActive && cameraSampleClock.elapsed() >= 10000)
         cameraInputTest(false);
-    if (!simActive) {
+    if (!simActive || offlineBoard) {
+        auto panorama = board->takePanorama();
+        if (offlineBoard && !panorama.isNull()) {
+            panels[1]->viewport->setImage(panorama);
+            panels[1]->sizeLabel->setText("2656 × 1328 · PS/PL回图");
+            panels[1]->caption->setText("PS/PL校正拼接全景 · 网线回传");
+        }
         auto sphere = board->takeSphere();
         if (!sphere.isNull()) {
             panels[2]->viewport->setImage(sphere);
-            panels[2]->sizeLabel->setText("PS全景 → 球体");
+            panels[2]->sizeLabel->setText(QString("%1 × %2 · PS全景 → 球体")
+                                            .arg(sphere.width()).arg(sphere.height()));
         }
         auto result = board->takeDisplay();
         if (!result.image.isNull()) {
             panels[3]->viewport->setTrackedImage(result.image, result.sampleId,
                                                  result.renderStartedUs, result.renderedAtUs,
                                                  LatencyTracker::nowUs());
-            panels[3]->sizeLabel->setText("PS全景 → 当前视角");
+            panels[3]->sizeLabel->setText(QString("%1 × %2 · PS全景 → 当前视角")
+                                            .arg(result.image.width()).arg(result.image.height()));
             panels[3]->timestamp->setText(
                 QString("PS帧 %1 · epoch %2").arg(result.frame).arg(result.epoch));
         }
@@ -733,6 +953,11 @@ void MainWindow::refresh() {
     bool recording = running && live["recording"].toBool();
     settings->setCaptureLocked(running);
     settings->setSimulationEnabled(simActive);
+    if (offlineBoard) {
+        for (auto *value : settings->rear)
+            value->setEnabled(false);
+        settings->blend->setEnabled(false);
+    }
     if (!simActive) {
         settings->yaw->setEnabled(true);
         settings->pitch->setEnabled(true);
@@ -743,7 +968,7 @@ void MainWindow::refresh() {
             button->setEnabled(true);
         settings->resetButton->setEnabled(true);
     }
-    if (!simActive) {
+    if (!simActive || offlineBoard) {
         panels[2]->caption->setText("PS/PL校正拼接全景 · 球面展示");
         panels[3]->caption->setText("PS/PL全景 · 任意方向透视视角");
     }
@@ -759,7 +984,8 @@ void MainWindow::refresh() {
     pauseButton->setEnabled(simActive && displayed && displayed->video);
     seek->setEnabled(pauseButton->isEnabled());
     exitButton->setEnabled(simActive);
-    exportButton->setEnabled(simActive && displayed && !exportPending);
+    exitButton->setText(offlineBoard ? "退出离线输入" : "退出仿真");
+    exportButton->setEnabled(simActive && !offlineBoard && displayed && !exportPending);
     exportButton->setText(exportPending ? "正在导出…" : "导出高清图像与 LUT");
     for (int i : {2, 3})
         panels[i]->viewport->setEnabled(!qualityActive);
@@ -770,6 +996,49 @@ void MainWindow::refresh() {
         datasetButton->setEnabled(false);
     }
 }
+void MainWindow::advancePresentation(int delta) {
+    if (presentationStep < 0)
+        return;
+    presentationAuto->setChecked(false);
+    setPresentationStep(std::clamp(presentationStep + delta, 0, 4));
+}
+
+void MainWindow::setPresentationStep(int step) {
+    presentationStep = std::clamp(step, -1, 4);
+    const bool overview = presentationStep < 0 || presentationStep == 4;
+    constexpr int order[] = {0, 1, 2, 3};
+    const QStringList titles{"校正前 · 原始双鱼眼", "校正后 · PS/PL全景",
+                             "球体显示", "云台显示", "四屏总览"};
+    setUpdatesEnabled(false);
+    statisticsBar->setVisible(presentationStep < 0);
+    for (auto *panel : panels)
+        viewGrid->removeWidget(panel);
+    for (int i = 0; i < 2; ++i) {
+        viewGrid->setRowStretch(i, overview || i == 0 ? 1 : 0);
+        viewGrid->setColumnStretch(i, overview || i == 0 ? 1 : 0);
+        viewGrid->setRowMinimumHeight(i, 0);
+        viewGrid->setColumnMinimumWidth(i, 0);
+    }
+    for (int i = 0; i < 4; ++i) {
+        const bool visible = overview || order[presentationStep] == i;
+        panels[i]->setVisible(visible);
+        if (visible)
+            viewGrid->addWidget(panels[i], overview ? i / 2 : 0, overview ? i % 2 : 0);
+    }
+    if (presentationStep >= 0)
+        presentationTitle->setText(QString("%1 / 5  ·  %2").arg(presentationStep + 1)
+                                       .arg(titles[presentationStep]));
+    presentationPrevious->setEnabled(presentationStep > 0);
+    presentationNext->setEnabled(presentationStep >= 0 && presentationStep < 4);
+    if (overview) {
+        presentationTimer.stop();
+        presentationAuto->setChecked(false);
+    }
+    viewGrid->invalidate();
+    setUpdatesEnabled(true);
+    update();
+}
+
 void MainWindow::connectCamera() {
     if (qualityActive)
         return;
@@ -963,12 +1232,13 @@ void MainWindow::openSelected(const QString &name) {
         return;
     QString directory = item->data(Qt::UserRole).toString(), target = directory;
     if (name != "打开目录") {
+        const auto pair = pairedVideoFiles(directory);
         QStringList candidates = name == "打开原图" ? QStringList{"fisheye.png", "fisheye.mp4",
-                                                                  "front_10s.mp4", "front.png"}
+                                                                  pair[0], "front.png"}
                                                     : QStringList{"corrected.png", "corrected.mp4"};
         bool found = false;
         for (const auto &file : candidates)
-            if (QFile::exists(directory + "/" + file)) {
+            if (!file.isEmpty() && QFile::exists(directory + "/" + file)) {
                 target = directory + "/" + file;
                 found = true;
                 break;

@@ -18,6 +18,9 @@ bsp setlib -name xilffs -ver 4.8
 bsp setlib -name lwip211 -ver 1.8
 bsp config stdin psu_uart_0
 bsp config stdout psu_uart_0
+# GEM TX completion interrupts free PBUF_RAM. NO_SYS mutexes do not protect
+# the heap against those frees while the main loop allocates another packet.
+bsp config -append extra_compiler_flags "-DLWIP_ALLOW_MEM_FREE_FROM_OTHER_CONTEXT=1"
 bsp write
 platform write
 platform generate

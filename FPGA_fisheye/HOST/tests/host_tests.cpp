@@ -1,5 +1,7 @@
 #include "core/projection.h"
 #include "fpga/fpga_link.h"
+#include "fpga/network/mediawire.h"
+#include "fpga/network/boardvideoservice.h"
 #include "media/paired_source.h"
 #include "media/video_probe.h"
 #include "simulation/simulation_service.h"
@@ -13,6 +15,7 @@
 #include <QFile>
 #include <QJsonDocument>
 #include <QTemporaryDir>
+#include <QSpinBox>
 #include <QtTest>
 #include <opencv2/imgcodecs.hpp>
 using namespace df;
@@ -168,6 +171,215 @@ class HostTests : public QObject {
         QVERIFY_EXCEPTION_THROWN(PairedSource(directory.path(), true, {1328, 1328}),
                                  std::runtime_error);
     }
+    void pairedVideoNames() {
+        QTemporaryDir root;
+        QVERIFY(root.isValid());
+        const auto directory = root.path() + "/data/captures/data_source";
+        QVERIFY(QDir().mkpath(directory));
+        auto create = [&](const QString &name) {
+            QFile file(directory + "/" + name);
+            return file.open(QIODevice::WriteOnly);
+        };
+        QVERIFY(create("front.png"));
+        QVERIFY(create("rear.png"));
+        QVERIFY(create("front_64s.mp4"));
+        QVERIFY(pairedVideoFiles(directory)[0].isEmpty());
+        QVERIFY(create("rear_10s.mp4"));
+        QVERIFY(pairedVideoFiles(directory)[0].isEmpty());
+        QVERIFY(create("rear_64s.mp4"));
+        QCOMPARE(pairedVideoFiles(directory)[0], QString("front_64s.mp4"));
+        QCOMPARE(pairedVideoFiles(directory)[1], QString("rear_64s.mp4"));
+        QCOMPARE(defaultDataset(root.path()), directory);
+        QVERIFY(create("front_10s.mp4"));
+        QVERIFY(pairedVideoFiles(directory)[0].isEmpty());
+        QVERIFY(QFile::remove(directory + "/front_64s.mp4"));
+        QCOMPARE(pairedVideoFiles(directory)[0], QString("front_10s.mp4"));
+        QVERIFY(create("front.mp4"));
+        QVERIFY(create("rear.mp4"));
+        QCOMPARE(pairedVideoFiles(directory)[0], QString("front.mp4"));
+    }
+    void recordedOfflineVideo() {
+        const auto directory = qEnvironmentVariable("DF_OFFLINE_TEST_DATA");
+        if (directory.isEmpty())
+            QSKIP("Set DF_OFFLINE_TEST_DATA to verify an imported recording");
+        PairedSource source(directory, true, {1328, 1328});
+        QVERIFY(source.duration > 60.);
+        QCOMPARE(verifyVideoPair(directory)["paired_frames"].toInt(), int(source.pts.size()));
+        const auto first = source.read(0)[0].clone();
+        QVERIFY(!source.read(int(source.pts.size()) - 1)[1].empty());
+        QCOMPARE(cv::norm(first, source.read(0)[0], cv::NORM_INF), 0.);
+        MainWindow window(projectRoot(), false);
+        QVERIFY(window.findChild<QPushButton *>("offlineVideoButton"));
+        window.settings->sourceDirectory->setText(directory);
+        window.loadOfflineVideo();
+        QTRY_VERIFY_WITH_TIMEOUT(window.displayedFrame().has_value(), 15000);
+        QVERIFY(window.displayedFrame()->video);
+        QCOMPARE(window.displayedFrame()->fullRaw.size(), QSize(2656, 1328));
+        QString encodeError;
+        const auto wireInput = MediaWire::encode(window.displayedFrame()->fullRaw, &encodeError);
+        QVERIFY2(MediaWire::validInput(wireInput), qPrintable(encodeError));
+        QVERIFY(window.displayedFrame()->panorama.isNull());
+        QVERIFY(window.displayedFrame()->sphere.isNull());
+        QVERIFY(window.displayedFrame()->gimbal.isNull());
+        QVERIFY(window.panels[1]->sizeLabel->text().contains("等待"));
+        QVERIFY(window.panels[2]->sizeLabel->text().contains("等待"));
+        auto *pause = window.findChild<QPushButton *>("pauseButton");
+        pause->click();
+        QTRY_VERIFY(!window.displayedFrame()->playing);
+        auto *seek = window.findChild<QSlider *>("simulationSeek");
+        seek->setValue(9800);
+        QMetaObject::invokeMethod(seek, "sliderReleased");
+        QTRY_VERIFY_WITH_TIMEOUT(window.displayedFrame()->pts > 60., 15000);
+        window.close();
+    }
+    void recordedBoardHardware() {
+        if (qEnvironmentVariable("DF_REAL_BOARD_TEST") != "1")
+            QSKIP("Requires a connected PS/PL and DF_REAL_BOARD_TEST=1");
+        const auto directory = qEnvironmentVariable("DF_OFFLINE_TEST_DATA");
+        QVERIFY(!directory.isEmpty());
+        SimulationService worker(projectRoot() + "/config/calibration.json");
+        BoardVideoService board;
+        const int sphereDiameter = qEnvironmentVariableIntValue("DF_BOARD_SPHERE_DIAMETER");
+        const int perspectiveWidth = qEnvironmentVariableIntValue("DF_BOARD_VIEW_WIDTH");
+        if (sphereDiameter || perspectiveWidth)
+            board.setDisplaySizes(sphereDiameter, perspectiveWidth);
+        worker.load(directory, true, true);
+        worker.start();
+        const int jpegQuality = qEnvironmentVariableIntValue("DF_BOARD_JPEG_QUALITY");
+        if (jpegQuality)
+            board.setInputJpegQuality(jpegQuality, qEnvironmentVariableIntValue("DF_BOARD_INPUT_SMOOTH") == 1);
+        board.connectToBoard();
+        QEventLoop loop;
+        QTimer pump;
+        int returned = 0, submitted = 0;
+        const int runSeconds = qEnvironmentVariableIntValue("DF_BOARD_TEST_SECONDS");
+        QElapsedTimer clock;
+        clock.start();
+        qint64 firstReturn = -1, lastReturn = -1, longestGap = 0;
+        QSize displaySize, sphereSize;
+        qint64 renderUs = 0;
+        QString latestStatus;
+        connect(&board, &BoardVideoService::statusChanged, &loop,
+                [&](const QString &s) { latestStatus = s; });
+        connect(&board, &BoardVideoService::connectedChanged, &loop,
+                [&](bool connected) {
+                    if (!connected)
+                        loop.quit();
+                });
+        QTimer::singleShot(10000, &loop, [&] {
+            if (!board.isConnected())
+                loop.quit();
+        });
+        connect(&pump, &QTimer::timeout, &loop, [&] {
+            if (auto packet = worker.poll()) {
+                board.submit(packet->fullRaw, qRound64(packet->pts * 1000));
+                ++submitted;
+            }
+            const auto display = board.takeDisplay();
+            if (!display.image.isNull()) {
+                displaySize = display.image.size();
+                renderUs += display.renderedAtUs - display.renderStartedUs;
+                if (firstReturn < 0)
+                    firstReturn = clock.elapsed();
+                if (lastReturn >= 0)
+                    longestGap = qMax(longestGap, clock.elapsed() - lastReturn);
+                lastReturn = clock.elapsed();
+                ++returned;
+            }
+            const auto sphere = board.takeSphere();
+            if (!sphere.isNull())
+                sphereSize = sphere.size();
+            if (!runSeconds && returned >= 10)
+                loop.quit();
+        });
+        pump.start(5);
+        QTimer::singleShot(runSeconds > 0 ? runSeconds * 1000 : 30000,
+                           &loop, &QEventLoop::quit);
+        loop.exec();
+        worker.stop();
+        QVERIFY(worker.wait(5000));
+        qInfo().noquote() << "submitted=" << submitted << "returned=" << returned
+                          << "longest_return_gap_ms=" << longestGap << latestStatus;
+        const double activeReturnFps = lastReturn > firstReturn
+                                          ? (returned - 1) * 1000. / (lastReturn - firstReturn)
+                                          : 0.;
+        const QString reportFolder = projectRoot() + "/build/verification";
+        QDir().mkpath(reportFolder);
+        writeJson(reportFolder + "/offline_board_performance.json",
+                  {{"jpeg_quality", jpegQuality ? jpegQuality : 85},
+                   {"smooth_input", qEnvironmentVariableIntValue("DF_BOARD_INPUT_SMOOTH") == 1},
+                   {"elapsed_ms", double(clock.elapsed())},
+                   {"first_return_ms", double(firstReturn)},
+                   {"last_return_ms", double(lastReturn)},
+                   {"input_frames", submitted}, {"returned_frames", returned},
+                   {"active_return_fps", activeReturnFps},
+                   {"display_width", displaySize.width()}, {"display_height", displaySize.height()},
+                   {"sphere_width", sphereSize.width()}, {"sphere_height", sphereSize.height()},
+                   {"average_render_ms", returned ? double(renderUs) / returned / 1000. : 0.},
+                   {"longest_return_gap_ms", double(longestGap)},
+                   {"latest_diagnostic", latestStatus}});
+        qInfo() << "active_return_fps=" << activeReturnFps;
+        board.disconnectFromBoard();
+        QVERIFY2(returned >= 10, qPrintable(latestStatus));
+        QVERIFY(longestGap < 5000);
+        QVERIFY(clock.elapsed() - lastReturn < 5000);
+        // Opt in for hardware performance validation; ordinary smoke tests
+        // still support slower boards and brief samples.
+        const double minimumFps = qEnvironmentVariable("DF_BOARD_MIN_RETURN_FPS").toDouble();
+        if (minimumFps > 0)
+            QVERIFY2(activeReturnFps >= minimumFps, qPrintable(QStringLiteral("Actual return %1 FPS < %2 FPS")
+                                                                 .arg(activeReturnFps).arg(minimumFps)));
+    }
+    void presentationLayout() {
+        MainWindow window(projectRoot(), false);
+        window.show();
+        auto *mode = window.findChild<QPushButton *>("presentationButton");
+        auto *next = window.findChild<QPushButton *>("presentationNext");
+        auto *previous = window.findChild<QPushButton *>("presentationPrevious");
+        auto *automatic = window.findChild<QPushButton *>("presentationAuto");
+        auto *seconds = window.findChild<QSpinBox *>("presentationSeconds");
+        QVERIFY(mode && next && previous && automatic && seconds);
+        QTest::qWait(30);
+        auto *statistics = window.findChild<QWidget *>("metrics");
+        QVERIFY(statistics && statistics->isVisible());
+        const int normalWidth = window.panels[0]->width();
+        const int normalHeight = window.panels[0]->height();
+        mode->click();
+        QVERIFY(!statistics->isVisible());
+        constexpr int order[] = {0, 1, 2, 3};
+        for (int step = 0; step < 4; ++step) {
+            QTest::qWait(10);
+            for (int i = 0; i < 4; ++i)
+                QCOMPARE(window.panels[i]->isVisible(), i == order[step]);
+            QVERIFY(window.panels[order[step]]->width() > normalWidth);
+            if (step == 0)
+                window.saveScreenshot(projectRoot() + "/build/verification/presentation_single.png");
+            next->click();
+        }
+        for (auto *panel : window.panels)
+            QVERIFY(panel->isVisible());
+        QVERIFY(!next->isEnabled());
+        QVERIFY(!statistics->isVisible());
+        QTest::qWait(10);
+        QVERIFY(window.panels[0]->height() > normalHeight);
+        window.saveScreenshot(projectRoot() + "/build/verification/presentation_overview.png");
+        previous->click();
+        QVERIFY(window.panels[3]->isVisible());
+        seconds->setValue(2);
+        automatic->click();
+        QTRY_VERIFY_WITH_TIMEOUT(!automatic->isChecked(), 3000);
+        for (auto *panel : window.panels)
+            QVERIFY(panel->isVisible());
+        automatic->click();
+        QVERIFY(window.panels[0]->isVisible());
+        mode->click();
+        QVERIFY(statistics->isVisible());
+        QVERIFY(!automatic->isChecked());
+        QVERIFY(!window.findChild<QWidget *>("presentationControls")->isVisible());
+        for (auto *panel : window.panels)
+            QVERIFY(panel->isVisible());
+        QVERIFY(!window.simulationActive());
+    }
     void uiAndControls() {
         MainWindow window(projectRoot(), false);
         window.show();
@@ -210,10 +422,13 @@ class HostTests : public QObject {
         QVERIFY(seek);
         seek->setValue(9800);
         QMetaObject::invokeMethod(seek, "sliderReleased");
-        QTRY_VERIFY(window.displayedFrame()->pts > 9.7);
+        // Full-length MJPEG recordings can take longer to seek than the
+        // original ten-second fixture; verify the actual requested position.
+        QTRY_VERIFY_WITH_TIMEOUT(window.displayedFrame()->pts >
+                                     window.displayedFrame()->duration * .97, 30000);
         pause->click();
         QTRY_VERIFY_WITH_TIMEOUT(
-            window.displayedFrame()->playing && window.displayedFrame()->pts < 1, 3000);
+            window.displayedFrame()->playing && window.displayedFrame()->pts < 1, 5000);
         window.close();
         QTRY_VERIFY_WITH_TIMEOUT(!window.isVisible(), 10000);
         QVERIFY(!window.settings->isVisible());

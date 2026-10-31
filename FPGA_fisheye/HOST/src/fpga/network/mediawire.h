@@ -14,7 +14,7 @@ struct Chunk {
     QByteArray payload;
     quint32 captureTimestampMs = 0;
 };
-QByteArray encode(const QImage &image, QString *error = nullptr);
+QByteArray encode(const QImage &image, QString *error = nullptr, int quality = 85);
 bool validInput(const QByteArray &jpeg);
 QByteArray pack(const Chunk &chunk);
 bool parse(const QByteArray &wire, Chunk *chunk);

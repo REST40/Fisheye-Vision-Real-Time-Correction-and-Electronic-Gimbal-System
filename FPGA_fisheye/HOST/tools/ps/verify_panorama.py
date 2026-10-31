@@ -35,6 +35,7 @@ common = [str(source / (name + '.c')) for name in
 results = {'corrector_clock_hz':frequency}
 for name, extra in [('lut_latency_check', [str(output / 'reference.o')]),
                     ('latency_wire_check', [str(source / 'fptz_protocol.c')]),
+                    ('tx_backpressure_check', [str(source / 'fptz_protocol.c')]),
                     ('panorama_server_check', [str(source / 'fptz_server.c'),
                                                str(source / 'fptz_protocol.c')])]:
     binary = output / name

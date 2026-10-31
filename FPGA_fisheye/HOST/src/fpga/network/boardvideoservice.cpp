@@ -3,6 +3,7 @@
 #include "panoramaview.h"
 #include <QEventLoop>
 #include <QTimer>
+#include <QtMath>
 #include <chrono>
 #include <memory>
 #include <opencv2/imgproc.hpp>
@@ -100,6 +101,7 @@ bool BoardVideoService::enterQualityMode() {
     m_decode = {};
     m_display = {};
     m_sphere = {};
+    m_panorama = {};
     m_viewDirty = false;
     m_latency.setActive(false, "图像质量独立测试");
     return true;
@@ -116,6 +118,27 @@ bool BoardVideoService::qualityCanCapture() const {
 BoardEndpoints BoardVideoService::qualityEndpoints() const {
     std::lock_guard<std::mutex> lock(m_mutex);
     return m_endpoints;
+}
+void BoardVideoService::setInputJpegQuality(int quality, bool smooth) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_inputJpegQuality = qBound(50, quality, 95);
+    m_smoothInput = smooth;
+}
+void BoardVideoService::setDisplaySizes(int sphereDiameter, int perspectiveWidth) {
+    // Quantize to avoid rebuilding maps for every pixel while resizing.
+    const auto rounded = [](int value) { return ((value + 63) / 64) * 64; };
+    // Viewport crops the empty margin of the sphere, whose visible diameter
+    // is about 85% of the projection texture. Account for that margin here.
+    const int sphereSide = qBound(720, rounded(qCeil(sphereDiameter * 1.18)), 1440);
+    const int width = qBound(1280, rounded(perspectiveWidth), 1920);
+    const QSize sphereSize(sphereSide, sphereSide), perspectiveSize(width, width * 9 / 16);
+    std::lock_guard<std::mutex> lock(m_mutex);
+    if (m_sphereSize == sphereSize && m_perspectiveSize == perspectiveSize)
+        return;
+    m_sphereSize = sphereSize;
+    m_perspectiveSize = perspectiveSize;
+    m_viewDirty = true;
+    m_wake.notify_all();
 }
 void BoardVideoService::submit(const QImage &image, qint64 cameraTimestampMs) {
     std::lock_guard<std::mutex> lock(m_mutex);
@@ -234,6 +257,12 @@ QImage BoardVideoService::takeSphere() {
     m_sphere = {};
     return m_connected && !m_paused ? result : QImage();
 }
+QImage BoardVideoService::takePanorama() {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    auto result = m_panorama;
+    m_panorama = {};
+    return m_connected && !m_paused ? result : QImage();
+}
 void BoardVideoService::codecLoop() {
     PanoramaView projection;
     QImage panorama;
@@ -244,6 +273,7 @@ void BoardVideoService::codecLoop() {
         Output output;
         quint64 generation;
         df::View view;
+        QSize sphereSize, perspectiveSize;
         bool viewDirty = false;
         {
             std::unique_lock<std::mutex> lock(m_mutex);
@@ -278,6 +308,8 @@ void BoardVideoService::codecLoop() {
             m_decode = {};
             generation = m_generation;
             view = {m_pan, m_tilt, m_hfov};
+            sphereSize = m_sphereSize;
+            perspectiveSize = m_perspectiveSize;
             viewDirty = m_viewDirty;
             m_viewDirty = false;
         }
@@ -303,12 +335,13 @@ void BoardVideoService::codecLoop() {
             try {
                 QImage sphere, perspective;
                 const auto renderStart = steadyUs();
-                projection.render(panorama, view, sphere, perspective);
+                projection.render(panorama, view, sphere, perspective, sphereSize, perspectiveSize);
                 const auto renderEnd = steadyUs();
                 std::lock_guard<std::mutex> lock(m_mutex);
                 if (panoramaGeneration == m_generation && panoramaIdentity.epoch == m_epoch &&
                     m_connected && !m_paused) {
                     m_sphere = sphere;
+                    m_panorama = panorama;
                     if (m_display.sampleId != panoramaIdentity.sampleId)
                         m_latency.status(m_display.sampleId, "display_queue_replaced");
                     m_latency.mark(panoramaIdentity.sampleId, "render_start", renderStart);
@@ -338,6 +371,8 @@ void BoardVideoService::encodeLoop() {
         qint64 captured;
         quint64 sampleId = 0;
         quint32 cameraTimestamp;
+        int jpegQuality;
+        bool smoothInput;
         {
             std::unique_lock<std::mutex> lock(m_mutex);
             m_wake.wait(lock, [this] { return m_codecExit || !m_raw.isNull(); });
@@ -350,12 +385,23 @@ void BoardVideoService::encodeLoop() {
             generation = m_generation;
             captured = m_capture;
             cameraTimestamp = m_cameraTimestamp;
+            jpegQuality = m_inputJpegQuality;
+            smoothInput = m_smoothInput;
         }
         if (!raw.isNull()) {
             QString error;
             const auto encodeStarted = steadyUs();
             m_latency.mark(sampleId, "encode_start", encodeStarted);
-            auto jpeg = MediaWire::encode(raw, &error);
+            QImage uploadImage = raw;
+            if (smoothInput) {
+                auto rgb = raw.convertToFormat(QImage::Format_RGB888);
+                cv::Mat source(rgb.height(), rgb.width(), CV_8UC3, rgb.bits(), rgb.bytesPerLine());
+                cv::Mat softened;
+                cv::GaussianBlur(source, softened, {13, 13}, 3.0);
+                uploadImage = QImage(softened.data, softened.cols, softened.rows,
+                                     int(softened.step), QImage::Format_RGB888).copy();
+            }
+            auto jpeg = MediaWire::encode(uploadImage, &error, jpegQuality);
             const auto encodeEnd = steadyUs();
             const auto encodeUs = quint64(encodeEnd - encodeStarted);
             m_latency.mark(sampleId, "encode_end", encodeEnd);
@@ -439,6 +485,7 @@ void BoardVideoService::run() {
                     m_decode = {};
                     m_display = {};
                     m_sphere = {};
+                    m_panorama = {};
                     m_decoded = 0;
                     m_encodedFrames = m_encodeWorkUs = m_encodeReplacements = 0;
                     lastEncodedFrames = lastEncodeWorkUs = 0;

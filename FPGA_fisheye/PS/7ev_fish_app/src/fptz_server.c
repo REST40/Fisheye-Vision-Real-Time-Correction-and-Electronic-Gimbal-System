@@ -233,6 +233,7 @@ static void start_return_test(FptzServer *s, uint32_t txn) {
     s->return_tx_count = (uint16_t)((s->return_len + s->max_payload - 1u) /
                                     s->max_payload);
     s->return_tx_next = 0;
+    s->return_retry_started_us = 0;
     s->return_started_us = s->ops.now_us(s->ops.ctx);
     s->return_active = 1;
     s->return_last_txn = txn;
@@ -738,6 +739,7 @@ static int handle_input(FptzServer *s, const FptzHeader *h,
         slot->input_len = h->object_len;
         slot->pair_valid=slot->sources_decoded=slot->corrected_valid=0;
         slot->rx_ack_counter=0;
+        slot->tx_retry_started_us=0;
         memset(&slot->jpeg_pair,0,sizeof(slot->jpeg_pair));
         slot->state = FPTZ_SLOT_RECEIVING;
         slot->first_rx_us = s->ops.now_us(s->ops.ctx);
@@ -971,8 +973,17 @@ static void pump_output(FptzServer *s, FptzFrameSlot *slot, uint8_t *batch_used)
         memcpy(packet + FPTZ_HEADER_SIZE, slot->output + offset, bytes);
         fptz_write_header(packet, &h);
         if (!slot->tx_next) slot->first_tx_us = s->ops.now_us(s->ops.ctx);
-        if (s->ops.send(s->ops.ctx, FPTZ_OUTPUT_PORT, FPTZ_OUTPUT_PORT,
-                        packet, (uint16_t)(FPTZ_HEADER_SIZE + bytes)) < 0) {
+        int sent = s->ops.send(s->ops.ctx, FPTZ_OUTPUT_PORT, FPTZ_OUTPUT_PORT,
+                               packet, (uint16_t)(FPTZ_HEADER_SIZE + bytes));
+        if (sent == FPTZ_SEND_AGAIN) {
+            uint64_t blocked = s->ops.now_us(s->ops.ctx);
+            if (!slot->tx_retry_started_us) slot->tx_retry_started_us = blocked;
+            s->next_video_tx_us = blocked + FPTZ_VIDEO_TX_GAP_US;
+            if (blocked - slot->tx_retry_started_us < FPTZ_VIDEO_TX_RETRY_US)
+                return; /* Same chunk, bounded retry; let RX and DMA progress. */
+            sent = -1;
+        }
+        if (sent < 0) {
             ++s->output_send_drop;
             send_latency_result(s,slot,4);
             slot->state = FPTZ_SLOT_FREE;
@@ -981,6 +992,7 @@ static void pump_output(FptzServer *s, FptzFrameSlot *slot, uint8_t *batch_used)
             send_credit(s);
             return;
         }
+        slot->tx_retry_started_us = 0;
         ++slot->tx_next;
         slot->last_tx_us = s->ops.now_us(s->ops.ctx);
         s->next_video_tx_us = slot->last_tx_us + FPTZ_VIDEO_TX_GAP_US;
@@ -994,6 +1006,7 @@ static void pump_output(FptzServer *s, FptzFrameSlot *slot, uint8_t *batch_used)
             send_credit(s);
             return;
         }
+        if (slot->last_tx_us - now >= FPTZ_VIDEO_TX_BUDGET_US) return;
     }
 }
 
@@ -1004,7 +1017,7 @@ static void pump_return_output(FptzServer *s, uint8_t *batch_used) {
     if (!s->return_active || !s->streaming || !s->paused ||
         *batch_used || now < s->next_video_tx_us) return;
     *batch_used = 1;
-    if (!s->return_tx_next) ++s->return_frames_started;
+    if (!s->return_tx_next && !s->return_retry_started_us) ++s->return_frames_started;
     h.msg_type=FPTZ_OUTPUT_JPEG; h.session_id=s->session_id;
     h.frame_id=0x80000000u | (s->return_frames_started & 0x7fffffffu);
     h.ptz_epoch=s->active_epoch; h.chunk_count=s->return_tx_count;
@@ -1017,12 +1030,22 @@ static void pump_return_output(FptzServer *s, uint8_t *batch_used) {
         h.chunk_index=s->return_tx_next; h.payload_len=bytes;
         memcpy(packet+FPTZ_HEADER_SIZE,s->return_jpeg+offset,bytes);
         fptz_write_header(packet,&h);
-        if (s->ops.send(s->ops.ctx,FPTZ_OUTPUT_PORT,FPTZ_OUTPUT_PORT,packet,
-                        (uint16_t)(FPTZ_HEADER_SIZE+bytes))<0) {
+        int sent = s->ops.send(s->ops.ctx,FPTZ_OUTPUT_PORT,FPTZ_OUTPUT_PORT,packet,
+                               (uint16_t)(FPTZ_HEADER_SIZE+bytes));
+        if (sent == FPTZ_SEND_AGAIN) {
+            uint64_t blocked = s->ops.now_us(s->ops.ctx);
+            if (!s->return_retry_started_us) s->return_retry_started_us = blocked;
+            s->next_video_tx_us = blocked + FPTZ_VIDEO_TX_GAP_US;
+            if (blocked - s->return_retry_started_us < FPTZ_VIDEO_TX_RETRY_US) return;
+            sent = -1;
+        }
+        if (sent < 0) {
             ++s->return_send_fail; s->return_tx_next=0;
+            s->return_retry_started_us=0;
             s->next_video_tx_us=s->ops.now_us(s->ops.ctx)+FPTZ_VIDEO_TX_GAP_US;
             return;
         }
+        s->return_retry_started_us=0;
         ++s->return_tx_next;
         s->next_video_tx_us=s->ops.now_us(s->ops.ctx)+FPTZ_VIDEO_TX_GAP_US;
         if (s->return_tx_next==s->return_tx_count) {
@@ -1031,6 +1054,7 @@ static void pump_return_output(FptzServer *s, uint8_t *batch_used) {
             s->return_tx_next=0;
             return;
         }
+        if (s->ops.now_us(s->ops.ctx) - now >= FPTZ_VIDEO_TX_BUDGET_US) return;
     }
 }
 

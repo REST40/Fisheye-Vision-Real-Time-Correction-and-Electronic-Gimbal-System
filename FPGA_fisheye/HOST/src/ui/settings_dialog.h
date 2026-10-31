@@ -23,7 +23,7 @@ class SettingsDialog : public QDialog {
     void openPage(int index = -1);
     QTabWidget *tabs;
     QLineEdit *sourceDirectory, *datasetDirectory, *recordDirectory;
-    QComboBox *sourceMode, *resolution, *encoder, *bitrate, *exposure, *iso, *shutter;
+    QComboBox *sourceMode, *offlineQuality, *resolution, *encoder, *bitrate, *exposure, *iso, *shutter;
     QSpinBox *seconds, *blend;
     QDoubleSpinBox *ev;
     QSlider *yaw, *pitch, *hfov;

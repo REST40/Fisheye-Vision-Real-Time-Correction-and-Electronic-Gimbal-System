@@ -9,6 +9,22 @@
 #include <stdexcept>
 #include <vector>
 namespace df {
+std::array<QString, 2> pairedVideoFiles(const QString &directory) {
+    QDir folder(directory);
+    if (folder.exists("front.mp4") && folder.exists("rear.mp4"))
+        return {"front.mp4", "rear.mp4"};
+    std::array<QString, 2> result;
+    for (const auto &front : folder.entryList({"front_*.mp4"}, QDir::Files, QDir::Name)) {
+        const auto rear = "rear_" + front.mid(6);
+        if (!folder.exists(rear))
+            continue;
+        // Multiple recording pairs need an explicit choice; never mix different suffixes.
+        if (!result[0].isEmpty())
+            return {};
+        result = {front, rear};
+    }
+    return result;
+}
 QJsonObject probeVideo(const QString &file) {
     QProcess p;
     p.start("ffprobe",
@@ -25,14 +41,10 @@ QJsonObject probeVideo(const QString &file) {
 }
 
 QJsonObject verifyVideoPair(const QString &directory) {
-    QString a, b;
-    if (QFile::exists(directory + "/front_10s.mp4")) {
-        a = "front_10s.mp4";
-        b = "rear_10s.mp4";
-    } else {
-        a = "fisheye.mp4";
-        b = "corrected.mp4";
-    }
+    auto pair = pairedVideoFiles(directory);
+    if (pair[0].isEmpty())
+        pair = {"fisheye.mp4", "corrected.mp4"};
+    const auto &a = pair[0], &b = pair[1];
     auto one = probeVideo(directory + "/" + a), two = probeVideo(directory + "/" + b);
     auto timestamps = [](const QJsonObject &info) {
         std::vector<double> result;
